@@ -1,0 +1,2 @@
+# sboardx
+Storyboard open format
