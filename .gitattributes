@@ -1,0 +1,2 @@
+# Samples are byte-exact archives; never normalize line endings inside them.
+samples/** -text

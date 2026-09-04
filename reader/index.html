@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0
+     Copyright 2026 Zero Eleven Labs Inc.
+     sboardx web reader — https://github.com/Upshot-Storyboard/sboardx -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sboardx reader</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #1a1a1f; --bg-panel: #22222a; --bg-bar: #1c1c23;
+      --line: #2e2e38; --text: #e8e6e3; --text-dim: #8a8890;
+      --accent: #3b82f6;
+    }
+    html, body { height: 100%; background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px; overflow: hidden; }
+
+    /* ── Drop zone ── */
+    #dropzone { position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 14px; z-index: 100; }
+    #dropzone h1 { font-size: 22px; font-weight: 600; }
+    #dropzone p  { color: var(--text-dim); }
+    #dropzone label { padding: 9px 20px; background: var(--accent); border-radius: 8px;
+      cursor: pointer; font-weight: 500; color: #fff; }
+    #dropzone input { display: none; }
+    #dropzone a { color: var(--text-dim); }
+    #drop-ring { position: fixed; inset: 12px; border: 2px dashed var(--accent);
+      border-radius: 14px; pointer-events: none; opacity: 0; transition: opacity .15s; }
+    body.dragging #drop-ring { opacity: 1; }
+
+    /* ── App shell ── */
+    #app { display: none; height: 100%; grid-template-rows: 44px 1fr 122px;
+      grid-template-columns: 148px 1fr 220px;
+      grid-template-areas: "hd hd hd" "strip canvas meta" "tl tl tl"; }
+    #app.on { display: grid; }
+
+    /* Header */
+    #hd { grid-area: hd; display: flex; align-items: center; gap: 10px;
+      padding: 0 14px; background: var(--bg-bar); border-bottom: 1px solid var(--line); }
+    .brand { width: 28px; height: 28px; background: var(--accent); border-radius: 7px;
+      display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
+    #proj-title { font-weight: 600; font-size: 13px; }
+    #proj-sub   { font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+    .hd-space { flex: 1; }
+    #timecode { font-family: 'SF Mono', monospace; font-size: 12px; color: var(--text-dim);
+      min-width: 64px; text-align: right; }
+    #play-btn { width: 34px; height: 34px; border-radius: 50%; background: var(--accent);
+      border: none; cursor: pointer; color: #fff; font-size: 13px;
+      display: flex; align-items: center; justify-content: center; }
+    #play-btn:hover { filter: brightness(1.15); }
+
+    /* Panel strip */
+    #strip { grid-area: strip; overflow-y: auto; overflow-x: hidden;
+      border-right: 1px solid var(--line); background: var(--bg-panel);
+      padding: 6px; display: flex; flex-direction: column; gap: 5px; }
+    .thumb { cursor: pointer; border-radius: 5px; overflow: hidden;
+      border: 2px solid transparent; background: #111; flex-shrink: 0; }
+    .thumb.active { border-color: var(--accent); }
+    .thumb-svg { width: 100%; aspect-ratio: 16/9; display: block; background: #fff; }
+    .thumb svg  { width: 100%; height: 100%; display: block; }
+    .thumb-info { padding: 2px 5px 4px; display: flex; justify-content: space-between;
+      font-size: 9px; font-family: monospace; color: var(--text-dim); }
+
+    /* Canvas */
+    #canvas-area { grid-area: canvas; display: flex; align-items: center;
+      justify-content: center; padding: 16px; background: var(--bg); overflow: hidden; }
+    /* White wrap background: with wide shots (z < 1) the framed region is
+       larger than the artwork's paper rect — paper extends beyond it. */
+    #canvas-wrap { position: relative; max-width: 100%; max-height: 100%;
+      background: #fff; border-radius: 3px; overflow: hidden; }
+    #canvas-wrap svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+    /* Inner wrapper that receives the scene's camera transform during
+       playback (pan / zoom / rotate, sampled at the playhead). */
+    #cam-content { position: absolute; inset: 0; will-change: transform; }
+    /* Overflow art (stroke geometry outside the 0..960/0..540 frame) must
+       survive the SVG's own viewport clip so camera pans can reveal it;
+       #canvas-wrap's overflow:hidden remains the frame clip. Thumbnails
+       (.thumb-svg) keep the default viewBox clipping. */
+    #cam-content svg { overflow: visible; }
+
+    /* Meta */
+    #meta { grid-area: meta; padding: 14px; border-left: 1px solid var(--line);
+      background: var(--bg-panel); overflow-y: auto;
+      display: flex; flex-direction: column; gap: 14px; }
+    .mf label { font-size: 9px; color: var(--text-dim); text-transform: uppercase;
+      letter-spacing: .06em; display: block; margin-bottom: 3px; }
+    .mf .v { font-size: 14px; font-weight: 500; }
+    .mf .note { font-size: 12px; color: var(--text-dim); line-height: 1.55;
+      white-space: pre-wrap; word-break: break-word; }
+
+    /* Timeline */
+    #tl { grid-area: tl; border-top: 1px solid var(--line); background: var(--bg-panel);
+      overflow: hidden; position: relative; }
+    #tl-scroll { overflow-x: auto; overflow-y: hidden; height: 100%; cursor: crosshair; }
+    #tl-inner  { position: relative; height: 100%; }
+    /* Scene strip: one colored band per scene + its camera keyframe
+       diamonds. Hidden (height 0) for files without scenes. */
+    .tl-scenes { position: absolute; top: 0; left: 0; height: 22px; }
+    .sblock { position: absolute; top: 3px; height: 16px; border-radius: 3px;
+      font-size: 9px; font-weight: 600; letter-spacing: .04em; overflow: hidden;
+      white-space: nowrap; display: flex; align-items: center; gap: 5px;
+      padding: 0 6px; pointer-events: none; }
+    .sblock .sc-count { opacity: .55; font-weight: 400; font-family: monospace; }
+    .kf-diamond { position: absolute; top: 7px; width: 7px; height: 7px;
+      transform: translateX(-50%) rotate(45deg); border-radius: 1px;
+      pointer-events: none; z-index: 3; box-shadow: 0 0 0 1px var(--bg-panel); }
+    .kf-path { position: absolute; top: 10px; height: 0; pointer-events: none;
+      border-top: 1.5px dashed currentColor; opacity: .55; }
+    .tl-video { position: absolute; top: 22px; height: 56px; left: 0; }
+    .pblock { position: absolute; top: 8px; height: 40px; border-radius: 5px;
+      background: #32323e; border: 1px solid transparent; overflow: hidden;
+      font-size: 9px; font-family: monospace; color: #9a9aaa;
+      display: flex; align-items: flex-end; padding: 0 5px 5px; cursor: pointer; }
+    .pblock.active { border-color: var(--accent); color: #fff; }
+    .tl-audio { position: absolute; top: 78px; left: 0; height: 36px; }
+    .ablock { position: absolute; top: 4px; height: 28px; border-radius: 5px;
+      font-size: 9px; font-family: monospace; overflow: hidden; white-space: nowrap;
+      display: flex; align-items: center; padding: 0 6px; }
+    .ak-music    { background: rgba(59,130,246,.25); border: 1px solid #3b82f6; color: #93c5fd; }
+    .ak-sfx      { background: rgba(16,185,129,.25); border: 1px solid #10b981; color: #6ee7b7; }
+    .ak-dialogue { background: rgba(245,158,11,.25); border: 1px solid #f59e0b; color: #fcd34d; }
+    #ph { position: absolute; top: 0; bottom: 0; width: 2px;
+      background: var(--accent); pointer-events: none; z-index: 5; }
+    #ph::before { content:''; position: absolute; top: 0; left: -4px;
+      border: 5px solid transparent; border-top: 6px solid var(--accent); }
+  </style>
+</head>
+<body>
+
+<div id="dropzone">
+  <div class="brand">◼</div>
+  <h1>sboardx reader</h1>
+  <p>Open a .sboardx storyboard file</p>
+  <label>Choose file <input type="file" accept=".sboardx" id="file-input"></label>
+  <p style="color:var(--text-dim);font-size:11px">or drag and drop anywhere</p>
+  <p style="font-size:11px"><a href="https://github.com/Upshot-Storyboard/sboardx">Format spec &amp; source</a></p>
+</div>
+<div id="drop-ring"></div>
+
+<div id="app">
+  <div id="hd">
+    <div class="brand">◼</div>
+    <div>
+      <div id="proj-title">—</div>
+      <div id="proj-sub">—</div>
+    </div>
+    <div class="hd-space"></div>
+    <span id="timecode">00:00:00</span>
+    <button id="play-btn" title="Play / Pause  (Space)">▶</button>
+  </div>
+
+  <div id="strip"></div>
+
+  <div id="canvas-area">
+    <div id="canvas-wrap"><div id="cam-content"></div></div>
+  </div>
+
+  <div id="meta">
+    <div class="mf"><label>Scene</label><div class="v" id="m-scene">—</div></div>
+    <div class="mf"><label>Shot</label><div class="v"  id="m-shot">—</div></div>
+    <div class="mf"><label>Code</label><div class="v"  id="m-code">—</div></div>
+    <div class="mf"><label>Duration</label><div class="v" id="m-dur">—</div></div>
+    <div class="mf"><label>Camera</label><div class="v" id="m-camera" style="font-size:12px">—</div></div>
+    <div class="mf"><label>Dialogue</label><div class="note" id="m-dialogue"></div></div>
+    <div class="mf"><label>Note</label><div class="note" id="m-note"></div></div>
+  </div>
+
+  <div id="tl">
+    <div id="tl-scroll">
+      <div id="tl-inner">
+        <div class="tl-scenes" id="tl-scenes"></div>
+        <div class="tl-video" id="tl-video"></div>
+        <div class="tl-audio" id="tl-audio"></div>
+        <div id="ph"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+'use strict';
+
+// ── State ────────────────────────────────────────────────────────────────────
+
+const S = {
+  project: null, sequence: null,
+  panels: [],          // [{id, meta, layers:[{id,name,visible,blend,opacity,art,image?}], svgText:Map, dispCode, scene}]
+  imageUrls: null,     // Map images/<file> -> blob URL (raster layers)
+  scenes: [],          // [{id, name, color, start, dur, count, kfs, synthetic}] in timeline order
+  clips: [],           // audio clips enriched with blobUrl
+  currentIdx: 0,
+  playhead: 0, playing: false,
+  playT0: 0, playH0: 0,
+  totalDur: 0, pps: 80,
+  activeAudio: [], audioTimers: [],
+  raf: null,
+};
+
+// Scene tag colors: the app's five accent swatches, by scene index mod 5.
+const SCENE_PALETTE = ['#3b82f6', '#7a5af0', '#19b3a6', '#f0772e', '#e0455e'];
+
+// ── Drop / file open ─────────────────────────────────────────────────────────
+
+document.body.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
+document.body.addEventListener('dragleave', () => document.body.classList.remove('dragging'));
+document.body.addEventListener('drop', e => {
+  e.preventDefault(); document.body.classList.remove('dragging');
+  const f = e.dataTransfer.files[0];
+  if (f) loadFile(f);
+});
+document.getElementById('file-input').addEventListener('change', e => {
+  if (e.target.files[0]) loadFile(e.target.files[0]);
+});
+
+// ── Load project ─────────────────────────────────────────────────────────────
+
+async function loadFile(file) {
+  let zip;
+  try { zip = await JSZip.loadAsync(file); }
+  catch(e) { alert('Could not open file: ' + e.message); return; }
+
+  S.project  = JSON.parse(await zip.file('project.json').async('string'));
+  S.sequence = JSON.parse(await zip.file('sequence.json').async('string'));
+
+  // sboardx 1.0 (SPEC.md). The sboardx:* SVG attributes are render-neutral
+  // here: paths are DOM-imported verbatim, fill-opacity renders natively,
+  // and the attributes are simply ignored. The optional audio track keys
+  // (per-clip `track`, root `tracks` mute list in audio/clips.json) are
+  // honored: one timeline row per track, muted tracks dimmed and silenced.
+  // The optional per-layer `blur` key (layers.json; Gaussian sigma in world
+  // units) renders natively for vector layers (the art <g>'s baked filter
+  // style imports verbatim) and is applied explicitly to raster <image>
+  // layers in compositeSVG.
+  if (S.project.sboardx !== '1.0') {
+    alert(`This archive uses sboardx format "${S.project.sboardx || 'unknown'}"; ` +
+          'this reader requires 1.0.');
+    return;
+  }
+
+  // Load panels
+  S.panels = [];
+  S.imageUrls = new Map();   // images/<file> -> blob URL (deduped across layers)
+  for (const id of S.sequence.panels) {
+    const meta   = JSON.parse(await zip.file(`panels/${id}/panel.json`).async('string'));
+    const layers = JSON.parse(await zip.file(`panels/${id}/layers.json`).async('string'));
+    const svgText = new Map();
+    for (const layer of layers.layers) {
+      const path = `panels/${id}/${layer.art}`;
+      const entry = zip.file(path);
+      if (entry) svgText.set(layer.id, await entry.async('string'));
+      // Raster layer: read the embedded image once into a blob URL.
+      if (layer.image && layer.image.file && !S.imageUrls.has(layer.image.file)) {
+        const imgEntry = zip.file(layer.image.file);
+        if (imgEntry) {
+          const buf = await imgEntry.async('arraybuffer');
+          S.imageUrls.set(layer.image.file,
+            URL.createObjectURL(new Blob([buf], { type: imageMimeFor(layer.image.file) })));
+        }
+      }
+    }
+    S.panels.push({ id, meta, layers: layers.layers, svgText });
+  }
+
+  // Load audio. clips.json may carry the optional track keys: a per-clip
+  // `track` (absent = 0) and a root `tracks` array of {muted} (absent =
+  // one unmuted track). Clips on different tracks may overlap and
+  // play together; muted tracks are silenced here.
+  S.clips = [];
+  S.tracks = [{ muted: false }];
+  const clipsFile = zip.file('audio/clips.json');
+  if (clipsFile) {
+    const clipsData = JSON.parse(await clipsFile.async('string'));
+    if (Array.isArray(clipsData.tracks) && clipsData.tracks.length) {
+      S.tracks = clipsData.tracks;
+    }
+    for (const clip of clipsData.clips) {
+      let blobUrl = null;
+      if (clip.file) {
+        const entry = zip.file(`audio/${clip.file}`);
+        if (entry) {
+          const buf = await entry.async('arraybuffer');
+          const mime = mimeFor(clip.file);
+          blobUrl = URL.createObjectURL(new Blob([buf], { type: mime }));
+        }
+      }
+      S.clips.push({ ...clip, blobUrl });
+    }
+  }
+
+  S.totalDur = S.panels.reduce((a, p) => a + p.meta.dur, 0);
+  S.currentIdx = 0;
+  S.playhead = 0;
+
+  // Show the app BEFORE building the UI: renderPanel sizes the canvas from
+  // the live layout (clientWidth/Height), which are 0 while #app is still
+  // display:none — the first panel would collapse to a 0×0 (dark) canvas
+  // until the next panel switch re-rendered it.
+  document.getElementById('dropzone').style.display = 'none';
+  document.getElementById('app').classList.add('on');
+  buildScenes();
+  buildUI();
+}
+
+// Keep the canvas sized to the viewport (also covers any load-order path
+// where the first layout pass wasn't live yet).
+window.addEventListener('resize', () => {
+  if (S.panels.length) renderPanel(S.currentIdx);
+});
+
+// ── Scenes ───────────────────────────────────────────────────────────────────
+//
+// sequence.json's `scenes` groups contiguous panels and carries each scene's
+// camera move: keyframes {t, z, cx, cy, rot} with `t` in seconds local to the
+// scene (0 = the scene's first panel's start). A file without scenes (not
+// something the app writes) gets a single synthetic one (no camera, not
+// drawn in the strip) so the rest of the reader has one code path.
+function buildScenes() {
+  const raw = (S.sequence.scenes || []).filter(sc => sc && Array.isArray(sc.panels));
+  const byPanel = new Map();
+  raw.forEach(sc => sc.panels.forEach(pid => byPanel.set(pid, sc)));
+
+  // One built scene per contiguous run of panels sharing a raw scene. For
+  // files without scenes every panel maps to null, producing exactly one
+  // synthetic run. A panel missing from every scene list adopts its
+  // neighbour's scene (first panel: the first raw scene, if any).
+  S.scenes = [];
+  let t = 0;
+  let prevRaw;
+  let built = null;
+  let first = true;
+  for (const panel of S.panels) {
+    const fallback = first ? (raw[0] || null) : prevRaw;
+    const rawScene = byPanel.has(panel.id) ? byPanel.get(panel.id) : fallback;
+    if (first || rawScene !== prevRaw) {
+      built = {
+        id: rawScene ? rawScene.id : 'synthetic',
+        name: rawScene ? (rawScene.name || 'Scene') : '',
+        color: SCENE_PALETTE[(rawScene ? S.scenes.length : 0) % SCENE_PALETTE.length],
+        start: t, dur: 0, count: 0,
+        kfs: rawScene && rawScene.camera && Array.isArray(rawScene.camera.keyframes)
+          ? rawScene.camera.keyframes.slice().sort((a, b) => a.t - b.t) : [],
+        synthetic: !rawScene,
+      };
+      S.scenes.push(built);
+    }
+    prevRaw = rawScene;
+    first = false;
+    built.dur += panel.meta.dur;
+    built.count += 1;
+    panel.scene = built;
+    t += panel.meta.dur;
+  }
+
+  // Display codes: "{sceneNumber}-{letter}", letter restarting per scene —
+  // derived like the app derives them. Files without scenes keep their
+  // stored codes.
+  const counters = new Map();
+  S.panels.forEach(p => {
+    if (p.scene && !p.scene.synthetic) {
+      const n = (counters.get(p.scene) || 0) + 1;
+      counters.set(p.scene, n);
+      const letter = String.fromCharCode(65 + ((n - 1) % 26));
+      p.dispCode = `${S.scenes.indexOf(p.scene) + 1}-${letter}`;
+    } else {
+      p.dispCode = p.meta.code;
+    }
+  });
+}
+
+// ── Camera move interpolation (mirror of the app's sb::cam::poseAt) ─────────
+//
+// Hold at both ends (a single keyframe is a static transform for the whole
+// scene); between keyframes: smoothstep easing, geometric zoom (lerp of
+// ln z), linear pan, shortest-arc rotation (degrees).
+function wrapDeg(d) {
+  let x = ((d + 180) % 360 + 360) % 360;
+  return x - 180;
+}
+
+function camPoseAt(kfs, t) {
+  if (!kfs.length) return null;
+  const pose = k => ({ z: k.z, cx: k.cx, cy: k.cy, rot: k.rot || 0 });
+  if (t <= kfs[0].t) return pose(kfs[0]);
+  if (t >= kfs[kfs.length - 1].t) return pose(kfs[kfs.length - 1]);
+  let i = 0;
+  while (i + 2 < kfs.length && kfs[i + 1].t <= t) i++;
+  const a = kfs[i], b = kfs[i + 1];
+  const span = b.t - a.t;
+  const raw = span > 1e-9 ? Math.max(0, Math.min(1, (t - a.t) / span)) : 1;
+  const f = raw * raw * (3 - 2 * raw);
+  return {
+    z: Math.exp(Math.log(a.z) + (Math.log(b.z) - Math.log(a.z)) * f),
+    cx: a.cx + (b.cx - a.cx) * f,
+    cy: a.cy + (b.cy - a.cy) * f,
+    rot: wrapDeg((a.rot || 0) + wrapDeg((b.rot || 0) - (a.rot || 0)) * f),
+  };
+}
+
+// Applies the current panel's scene camera (sampled at the playhead) to the
+// canvas content. Pose cx/cy are WORLD coordinates (frame center = origin):
+// the CSS chain equals the world affine
+//   p' = S(z)·R(−rot)·(p − c)
+// with transform-origin o = c + (w/2, h/2) (the framed center in element
+// coordinates) and translate d = −c, both as percentages of the
+// canvas-sized element.
+function applyCamera() {
+  const el = document.getElementById('cam-content');
+  const panel = S.panels[S.currentIdx];
+  const scene = panel && panel.scene;
+  const pose = scene ? camPoseAt(scene.kfs, S.playhead - scene.start) : null;
+  if (!pose) {
+    el.style.transform = '';
+    el.style.transformOrigin = '';
+    return;
+  }
+  const w = S.project.canvas.width, h = S.project.canvas.height;
+  el.style.transformOrigin =
+    `${((pose.cx + w / 2) / w * 100).toFixed(4)}% ${((pose.cy + h / 2) / h * 100).toFixed(4)}%`;
+  el.style.transform =
+    `translate(${(-pose.cx / w * 100).toFixed(4)}%, ${(-pose.cy / h * 100).toFixed(4)}%) ` +
+    `rotate(${(-pose.rot).toFixed(2)}deg) scale(${pose.z.toFixed(4)})`;
+}
+
+// "Push-in + pan · 100% → 155%" from a move's first/last keyframe.
+function camSummary(kfs) {
+  if (kfs.length < 2) return null;
+  const a = kfs[0], b = kfs[kfs.length - 1];
+  const dz = b.z - a.z;
+  // cx/cy are world units; "a real pan" = more than 2% of the frame width.
+  const pan = Math.hypot(b.cx - a.cx, b.cy - a.cy) > 0.02 * S.project.canvas.width;
+  const rot = Math.abs((b.rot || 0) - (a.rot || 0)) > 1;
+  let m;
+  if (Math.abs(dz) < 0.04) m = pan ? 'Pan' : (rot ? 'Rotate' : 'Hold');
+  else { m = dz > 0 ? 'Push-in' : 'Pull-out'; if (pan) m += ' + pan'; }
+  if (rot && (Math.abs(dz) >= 0.04 || pan)) m += ' + rotate';
+  return `${m} · ${Math.round(a.z * 100)}% → ${Math.round(b.z * 100)}%`;
+}
+
+function mimeFor(filename) {
+  const ext = filename.split('.').pop().toLowerCase();
+  return { mp3:'audio/mpeg', wav:'audio/wav', aiff:'audio/aiff',
+           aif:'audio/aiff', m4a:'audio/mp4', flac:'audio/flac',
+           ogg:'audio/ogg', caf:'audio/x-caf' }[ext] || 'audio/*';
+}
+
+function imageMimeFor(filename) {
+  const ext = filename.split('.').pop().toLowerCase();
+  return { png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg',
+           gif:'image/gif', webp:'image/webp' }[ext] || 'image/*';
+}
+
+// ── Build UI ──────────────────────────────────────────────────────────────────
+
+function buildUI() {
+  const p = S.project;
+  document.getElementById('proj-title').textContent = p.name;
+  const res = p.canvas && p.canvas.resolution
+    ? `${p.canvas.resolution.width}×${p.canvas.resolution.height}` : '';
+  document.getElementById('proj-sub').textContent =
+    [p.episode, res, `${S.panels.length} panels`, fmtTime(S.totalDur)].filter(Boolean).join(' · ');
+
+  buildStrip();
+  buildTimeline();
+  renderPanel(0);
+  updatePlayhead();
+}
+
+function buildStrip() {
+  const strip = document.getElementById('strip');
+  strip.innerHTML = '';
+  S.panels.forEach((panel, idx) => {
+    const div = document.createElement('div');
+    div.className = 'thumb' + (idx === 0 ? ' active' : '');
+    div.dataset.idx = idx;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'thumb-svg';
+    const svg = compositeSVG(panel, true);
+    wrap.appendChild(svg);
+    div.appendChild(wrap);
+
+    const info = document.createElement('div');
+    info.className = 'thumb-info';
+    info.innerHTML = `<span>${panel.dispCode}</span><span>${panel.meta.dur.toFixed(1)}s</span>`;
+    div.appendChild(info);
+
+    div.addEventListener('click', () => seekToPanel(idx));
+    strip.appendChild(div);
+  });
+}
+
+function buildTimeline() {
+  const scenesRow = document.getElementById('tl-scenes');
+  const video = document.getElementById('tl-video');
+  const audio = document.getElementById('tl-audio');
+  scenesRow.innerHTML = '';
+  video.innerHTML = '';
+  audio.innerHTML = '';
+
+  const totalW = S.totalDur * S.pps;
+  document.getElementById('tl-inner').style.width = Math.max(totalW + 100, 600) + 'px';
+
+  // Scene bands + camera keyframe diamonds (skipped for files without
+  // scenes, whose
+  // single synthetic scene carries no name or camera).
+  for (const sc of S.scenes) {
+    if (sc.synthetic) continue;
+    const band = document.createElement('div');
+    band.className = 'sblock';
+    band.style.left = (sc.start * S.pps) + 'px';
+    band.style.width = Math.max(sc.dur * S.pps - 3, 8) + 'px';
+    band.style.background = sc.color + '2e';   // ~18% tint
+    band.style.color = sc.color;
+    band.innerHTML = `<span>${escapeHtml(sc.name.toUpperCase())}</span>` +
+                     `<span class="sc-count">${sc.count}</span>`;
+    band.title = camSummary(sc.kfs) || sc.name;
+    scenesRow.appendChild(band);
+
+    // Dashed "motion path" between consecutive keyframes, then the diamonds.
+    for (let i = 0; i + 1 < sc.kfs.length; i++) {
+      const seg = document.createElement('div');
+      seg.className = 'kf-path';
+      seg.style.left = ((sc.start + sc.kfs[i].t) * S.pps) + 'px';
+      seg.style.width = Math.max(0, (sc.kfs[i + 1].t - sc.kfs[i].t) * S.pps) + 'px';
+      seg.style.color = sc.color;
+      scenesRow.appendChild(seg);
+    }
+    for (const kf of sc.kfs) {
+      const d = document.createElement('div');
+      d.className = 'kf-diamond';
+      d.style.left = ((sc.start + kf.t) * S.pps) + 'px';
+      d.style.background = sc.color;
+      d.title = `${Math.round(kf.z * 100)}%` + (kf.rot ? ` · ${Math.round(kf.rot)}°` : '');
+      scenesRow.appendChild(d);
+    }
+  }
+
+  let t = 0;
+  S.panels.forEach((panel, idx) => {
+    const w = panel.meta.dur * S.pps;
+    const el = document.createElement('div');
+    el.className = 'pblock' + (idx === 0 ? ' active' : '');
+    el.dataset.idx = idx;
+    el.style.left = (t * S.pps) + 'px';
+    el.style.width = Math.max(w - 3, 8) + 'px';
+    el.textContent = panel.dispCode;
+    if (panel.scene && !panel.scene.synthetic) {
+      // Scene color bar along the clip's top edge (inset so the active
+      // border still renders on all four sides).
+      el.style.boxShadow = 'inset 0 2px 0 ' + panel.scene.color;
+    }
+    el.addEventListener('click', () => seekToPanel(idx));
+    video.appendChild(el);
+    t += panel.meta.dur;
+  });
+
+  // One 36px row per audio track; muted rows render dimmed. The timeline
+  // grid row grows to fit (78px of ruler/video + N*36 + 8 padding).
+  const nTracks = Math.max(1, S.tracks.length);
+  audio.style.height = (nTracks * 36) + 'px';
+  document.getElementById('app').style.gridTemplateRows =
+    `44px 1fr ${78 + nTracks * 36 + 8}px`;
+  for (const clip of S.clips) {
+    const ti = Math.min(Math.max(clip.track ?? 0, 0), nTracks - 1);
+    const el = document.createElement('div');
+    el.className = `ablock ak-${clip.kind}`;
+    el.style.left  = (clip.start * S.pps) + 'px';
+    el.style.top   = (ti * 36 + 4) + 'px';
+    el.style.width = Math.max(clip.dur * S.pps - 2, 8) + 'px';
+    if (S.tracks[ti] && S.tracks[ti].muted) el.style.opacity = '0.4';
+    el.textContent = clip.name;
+    el.title = `${clip.name}  ${fmtTime(clip.start)} – ${fmtTime(clip.start + clip.dur)}  trimIn: ${clip.trim_in?.toFixed(2) ?? 0}s`;
+    audio.appendChild(el);
+  }
+
+  // Click to seek
+  document.getElementById('tl-scroll').addEventListener('click', e => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const scrollX = e.currentTarget.scrollLeft;
+    const x = e.clientX - rect.left + scrollX;
+    seekTo(x / S.pps);
+  });
+}
+
+// ── SVG composite ─────────────────────────────────────────────────────────────
+
+function compositeSVG(panel, mini = false) {
+  const w = S.project.canvas.width;
+  const h = S.project.canvas.height;
+  const NS = 'http://www.w3.org/2000/svg';
+
+  // World coordinates: the frame is centered on the origin,
+  // so the viewport spans -w/2..w/2 / -h/2..h/2. Overflow art lies outside
+  // it and is revealed only by the camera transform.
+  const root = document.createElementNS(NS, 'svg');
+  root.setAttribute('viewBox', `${-w / 2} ${-h / 2} ${w} ${h}`);
+  root.setAttribute('xmlns', NS);
+  if (mini) { root.setAttribute('width', '100%'); root.setAttribute('height', '100%'); }
+
+  const bg = document.createElementNS(NS, 'rect');
+  bg.setAttribute('x', String(-w / 2)); bg.setAttribute('y', String(-h / 2));
+  bg.setAttribute('width', String(w)); bg.setAttribute('height', String(h));
+  bg.setAttribute('fill', 'white');
+  root.appendChild(bg);
+
+  const parser = new DOMParser();
+  for (const layer of panel.layers) {        // already bottom-to-top
+    if (!layer.visible) continue;
+    // Raster layer: one <image> in world coordinates — the natural-
+    // pixel rect centered on the origin, mapped by the stored affine
+    // (matrix() shares CoreGraphics' scalar layout, so the six-tuple passes
+    // through untouched). Its art SVG is an empty <g> and is skipped.
+    if (layer.image) {
+      const url = S.imageUrls && S.imageUrls.get(layer.image.file);
+      if (!url) continue;                    // bytes missing from the archive
+      const [a, b, c, d, tx, ty] = layer.image.transform;
+      const img = document.createElementNS(NS, 'image');
+      img.setAttribute('href', url);
+      img.setAttribute('x', String(-layer.image.w / 2));
+      img.setAttribute('y', String(-layer.image.h / 2));
+      img.setAttribute('width', String(layer.image.w));
+      img.setAttribute('height', String(layer.image.h));
+      img.setAttribute('preserveAspectRatio', 'none');
+      img.setAttribute('transform', `matrix(${a} ${b} ${c} ${d} ${tx} ${ty})`);
+      // Vector layers carry opacity/blend/blur baked into their art <g>
+      // style; a raster layer's art SVG is skipped, so its styling comes
+      // from layers.json here. blur (optional) is the Gaussian sigma in
+      // world units — CSS blur's length is the stdDeviation and the SVG
+      // user space is world units, so the value passes through 1:1.
+      let style = '';
+      if (typeof layer.opacity === 'number' && layer.opacity !== 100)
+        style += `opacity: ${layer.opacity / 100}; `;
+      if (layer.blend && layer.blend !== 'normal')
+        style += `mix-blend-mode: ${layer.blend}; `;
+      if (layer.blur) style += `filter: blur(${layer.blur}px); `;
+      if (style) img.setAttribute('style', style.trim());
+      root.appendChild(img);
+      continue;
+    }
+    const svgStr = panel.svgText.get(layer.id);
+    if (!svgStr) continue;
+    const doc = parser.parseFromString(svgStr, 'image/svg+xml');
+    const g = doc.querySelector('g');
+    if (g) {
+      root.appendChild(document.importNode(g, true));
+    } else {
+      // Fallback: some producers (e.g. Toon Boom's TB_ExportSboardx before
+      // it grew the wrapper) emit drawables directly under <svg> with no
+      // <g> — import them in document order instead of dropping the layer.
+      for (const child of Array.from(doc.documentElement.children)) {
+        if (child.tagName === 'parsererror') continue;
+        // The app exporter's invisible frame-placeholder rect.
+        if (child.tagName === 'rect' && child.getAttribute('fill') === 'none') continue;
+        root.appendChild(document.importNode(child, true));
+      }
+    }
+  }
+  return root;
+}
+
+// ── Panel render ──────────────────────────────────────────────────────────────
+
+function renderPanel(idx) {
+  S.currentIdx = idx;
+  const panel = S.panels[idx];
+
+  // Canvas
+  const wrap = document.getElementById('canvas-wrap');
+  const w = S.project.canvas.width, h = S.project.canvas.height;
+  wrap.style.aspectRatio = `${w} / ${h}`;
+  // Size to fit available space while keeping aspect ratio. Skip when the
+  // layout isn't live (a 0-size area would collapse the canvas); the resize
+  // listener re-renders once real geometry exists.
+  const area = wrap.parentElement;
+  const aw = area.clientWidth - 32, ah = area.clientHeight - 32;
+  if (aw > 0 && ah > 0) {
+    const scale = Math.min(aw / w, ah / h);
+    wrap.style.width  = Math.round(w * scale) + 'px';
+    wrap.style.height = Math.round(h * scale) + 'px';
+  }
+
+  // The composite lives inside #cam-content, which receives the scene's
+  // camera transform (sampled at the playhead) while the panel shows.
+  const cam = document.getElementById('cam-content');
+  cam.innerHTML = '';
+  cam.appendChild(compositeSVG(panel));
+  applyCamera();
+
+  // Meta
+  const scene = panel.scene;
+  document.getElementById('m-scene').textContent =
+    scene && !scene.synthetic ? scene.name : '—';
+  document.getElementById('m-shot').textContent = panel.meta.shot || '—';
+  document.getElementById('m-code').textContent = panel.dispCode || '—';
+  document.getElementById('m-dur').textContent  = panel.meta.dur.toFixed(2) + 's';
+  document.getElementById('m-camera').textContent =
+    (scene && camSummary(scene.kfs)) || '—';
+  document.getElementById('m-dialogue').textContent = panel.meta.dialogue || '';
+  document.getElementById('m-note').textContent = panel.meta.note || '';
+
+  // Strip highlight
+  document.querySelectorAll('.thumb').forEach(el => {
+    el.classList.toggle('active', Number(el.dataset.idx) === idx);
+  });
+  // Scroll thumbnail into view
+  const thumb = document.querySelector(`.thumb[data-idx="${idx}"]`);
+  if (thumb) thumb.scrollIntoView({ block: 'nearest' });
+
+  // Timeline highlight
+  document.querySelectorAll('.pblock').forEach(el => {
+    el.classList.toggle('active', Number(el.dataset.idx) === idx);
+  });
+}
+
+// ── Playback ──────────────────────────────────────────────────────────────────
+
+function togglePlay() {
+  S.playing ? pause() : play();
+}
+
+function play() {
+  if (S.playhead >= S.totalDur - 0.01) S.playhead = 0;
+  S.playing = true;
+  S.playT0 = performance.now();
+  S.playH0 = S.playhead;
+  document.getElementById('play-btn').textContent = '⏸';
+  startAudio();
+  S.raf = requestAnimationFrame(tick);
+}
+
+function pause() {
+  S.playing = false;
+  cancelAnimationFrame(S.raf);
+  stopAudio();
+  document.getElementById('play-btn').textContent = '▶';
+}
+
+function tick() {
+  const elapsed = (performance.now() - S.playT0) / 1000;
+  S.playhead = Math.min(S.totalDur, S.playH0 + elapsed);
+  updatePlayhead();
+
+  // Current panel from cumulative durations
+  let t = 0;
+  for (let i = 0; i < S.panels.length; i++) {
+    if (S.playhead < t + S.panels[i].meta.dur || i === S.panels.length - 1) {
+      if (S.currentIdx !== i) renderPanel(i);
+      break;
+    }
+    t += S.panels[i].meta.dur;
+  }
+
+  applyCamera();
+
+  if (S.playhead >= S.totalDur) { pause(); return; }
+  S.raf = requestAnimationFrame(tick);
+}
+
+function seekTo(t) {
+  const wasPlaying = S.playing;
+  if (wasPlaying) pause();
+  S.playhead = Math.max(0, Math.min(S.totalDur, t));
+  updatePlayhead();
+
+  // Snap to panel
+  let acc = 0;
+  for (let i = 0; i < S.panels.length; i++) {
+    if (S.playhead < acc + S.panels[i].meta.dur || i === S.panels.length - 1) {
+      if (S.currentIdx !== i) renderPanel(i);
+      break;
+    }
+    acc += S.panels[i].meta.dur;
+  }
+  applyCamera();
+  if (wasPlaying) play();
+}
+
+function seekToPanel(idx) {
+  let t = 0;
+  for (let i = 0; i < idx; i++) t += S.panels[i].meta.dur;
+  seekTo(t);
+}
+
+function updatePlayhead() {
+  document.getElementById('ph').style.left = (S.playhead * S.pps) + 'px';
+  document.getElementById('timecode').textContent = fmtTimecode(S.playhead);
+  // Scroll timeline to keep playhead visible
+  const scroll = document.getElementById('tl-scroll');
+  const x = S.playhead * S.pps;
+  if (x < scroll.scrollLeft || x > scroll.scrollLeft + scroll.clientWidth - 40) {
+    scroll.scrollLeft = Math.max(0, x - 80);
+  }
+}
+
+// ── Audio ─────────────────────────────────────────────────────────────────────
+
+function startAudio() {
+  stopAudio();
+  for (const clip of S.clips) {
+    if (!clip.blobUrl) continue;
+    // Muted track: silenced (clips on different tracks otherwise all play —
+    // each clip is its own Audio element).
+    const track = S.tracks[Math.max(0, clip.track ?? 0)];
+    if (track && track.muted) continue;
+    const clipEnd = clip.start + clip.dur;
+    if (clipEnd <= S.playhead) continue;
+
+    const offsetInClip = Math.max(0, S.playhead - clip.start);
+    const delay = Math.max(0, clip.start - S.playhead);
+    const remaining = clip.dur - offsetInClip;
+    const trimIn = clip.trim_in ?? 0;
+
+    const start = () => {
+      const a = new Audio(clip.blobUrl);
+      a.volume = Math.max(0, Math.min(1, (clip.gain ?? 80) / 100));
+      a.currentTime = trimIn + offsetInClip;
+      a.play().catch(() => {});
+      S.activeAudio.push(a);
+      S.audioTimers.push(setTimeout(() => {
+        a.pause();
+        a.src = '';
+        S.activeAudio = S.activeAudio.filter(x => x !== a);
+      }, remaining * 1000));
+    };
+
+    if (delay < 0.05) {
+      start();
+    } else {
+      S.audioTimers.push(setTimeout(start, delay * 1000));
+    }
+  }
+}
+
+function stopAudio() {
+  S.activeAudio.forEach(a => { a.pause(); a.src = ''; });
+  S.activeAudio = [];
+  S.audioTimers.forEach(clearTimeout);
+  S.audioTimers = [];
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function fmtTime(s) {
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+function fmtTimecode(s) {
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60), f = Math.floor((s % 1) * 24);
+  return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}:${String(f).padStart(2,'0')}`;
+}
+
+// ── Keyboard ──────────────────────────────────────────────────────────────────
+
+document.addEventListener('keydown', e => {
+  if (!document.getElementById('app').classList.contains('on')) return;
+  if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); seekToPanel(Math.min(S.currentIdx + 1, S.panels.length - 1)); }
+  if (e.key === 'ArrowLeft')  { e.preventDefault(); seekToPanel(Math.max(S.currentIdx - 1, 0)); }
+});
+
+document.getElementById('play-btn').addEventListener('click', togglePlay);
+
+// Resize: recalculate canvas size
+window.addEventListener('resize', () => { if (S.panels.length) renderPanel(S.currentIdx); });
+</script>
+</body>
+</html>
