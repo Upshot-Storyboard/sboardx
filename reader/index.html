@@ -160,8 +160,7 @@
 
   <div id="meta">
     <div class="mf"><label>Scene</label><div class="v" id="m-scene">—</div></div>
-    <div class="mf"><label>Shot</label><div class="v"  id="m-shot">—</div></div>
-    <div class="mf"><label>Code</label><div class="v"  id="m-code">—</div></div>
+    <div class="mf"><label>Panel</label><div class="v" id="m-code">—</div></div>
     <div class="mf"><label>Duration</label><div class="v" id="m-dur">—</div></div>
     <div class="mf"><label>Camera</label><div class="v" id="m-camera" style="font-size:12px">—</div></div>
     <div class="mf"><label>Dialogue</label><div class="note" id="m-dialogue"></div></div>
@@ -232,9 +231,7 @@ async function loadFile(file) {
   // (per-clip `track`, root `tracks` mute list in audio/clips.json) are
   // honored: one timeline row per track, muted tracks dimmed and silenced.
   // The optional per-layer `blur` key (layers.json; Gaussian sigma in world
-  // units) renders natively for vector layers (the art <g>'s baked filter
-  // style imports verbatim) and is applied explicitly to raster <image>
-  // layers in compositeSVG.
+  // units) is applied in compositeSVG through an SVG <filter>.
   if (S.project.sboardx !== '1.0') {
     alert(`This archive uses sboardx format "${S.project.sboardx || 'unknown'}"; ` +
           'this reader requires 1.0.');
@@ -588,6 +585,8 @@ function buildTimeline() {
 
 // ── SVG composite ─────────────────────────────────────────────────────────────
 
+let blurFilterSeq = 0;   // unique <filter> ids across all composites on the page
+
 function compositeSVG(panel, mini = false) {
   const w = S.project.canvas.width;
   const h = S.project.canvas.height;
@@ -607,9 +606,33 @@ function compositeSVG(panel, mini = false) {
   bg.setAttribute('fill', 'white');
   root.appendChild(bg);
 
+  // Layer blur: an SVG filter per blurred layer, stdDeviation = the sigma in
+  // world units (user space IS world units, so it passes through 1:1). A
+  // real <filter> rather than the CSS `filter: blur()` shorthand the art
+  // <g> carries, because WebKit ignores CSS filter functions on SVG content.
+  // layers.json is the authoritative value. The region covers a full frame
+  // of overflow on every side so blurred overflow art isn't clipped.
+  let defs = null;
+  const blurFilterFor = (layer) => {
+    if (!(layer.blur > 0)) return null;
+    if (!defs) { defs = document.createElementNS(NS, 'defs'); root.appendChild(defs); }
+    const id = `blur-${++blurFilterSeq}`;
+    const f = document.createElementNS(NS, 'filter');
+    f.setAttribute('id', id);
+    f.setAttribute('filterUnits', 'userSpaceOnUse');
+    f.setAttribute('x', String(-1.5 * w)); f.setAttribute('y', String(-1.5 * h));
+    f.setAttribute('width', String(3 * w)); f.setAttribute('height', String(3 * h));
+    const fe = document.createElementNS(NS, 'feGaussianBlur');
+    fe.setAttribute('stdDeviation', String(layer.blur));
+    f.appendChild(fe);
+    defs.appendChild(f);
+    return `url(#${id})`;
+  };
+
   const parser = new DOMParser();
   for (const layer of panel.layers) {        // already bottom-to-top
     if (!layer.visible) continue;
+    const blurUrl = blurFilterFor(layer);
     // Raster layer: one <image> in world coordinates — the natural-
     // pixel rect centered on the origin, mapped by the stored affine
     // (matrix() shares CoreGraphics' scalar layout, so the six-tuple passes
@@ -626,17 +649,15 @@ function compositeSVG(panel, mini = false) {
       img.setAttribute('height', String(layer.image.h));
       img.setAttribute('preserveAspectRatio', 'none');
       img.setAttribute('transform', `matrix(${a} ${b} ${c} ${d} ${tx} ${ty})`);
-      // Vector layers carry opacity/blend/blur baked into their art <g>
-      // style; a raster layer's art SVG is skipped, so its styling comes
-      // from layers.json here. blur (optional) is the Gaussian sigma in
-      // world units — CSS blur's length is the stdDeviation and the SVG
-      // user space is world units, so the value passes through 1:1.
+      // Vector layers carry opacity/blend baked into their art <g> style; a
+      // raster layer's art SVG is skipped, so its styling comes from
+      // layers.json here.
       let style = '';
       if (typeof layer.opacity === 'number' && layer.opacity !== 100)
         style += `opacity: ${layer.opacity / 100}; `;
       if (layer.blend && layer.blend !== 'normal')
         style += `mix-blend-mode: ${layer.blend}; `;
-      if (layer.blur) style += `filter: blur(${layer.blur}px); `;
+      if (blurUrl) style += `filter: ${blurUrl}; `;
       if (style) img.setAttribute('style', style.trim());
       root.appendChild(img);
       continue;
@@ -646,17 +667,25 @@ function compositeSVG(panel, mini = false) {
     const doc = parser.parseFromString(svgStr, 'image/svg+xml');
     const g = doc.querySelector('g');
     if (g) {
-      root.appendChild(document.importNode(g, true));
+      const node = document.importNode(g, true);
+      // Replace the baked CSS blur (if any) with the <filter> reference;
+      // opacity and blend in the same style attribute stay as they are.
+      if (blurUrl) node.style.filter = blurUrl;
+      else if (node.style && node.style.filter) node.style.filter = '';
+      root.appendChild(node);
     } else {
       // Fallback: some producers (e.g. Toon Boom's TB_ExportSboardx before
       // it grew the wrapper) emit drawables directly under <svg> with no
       // <g> — import them in document order instead of dropping the layer.
+      const wrap = document.createElementNS(NS, 'g');
+      if (blurUrl) wrap.style.filter = blurUrl;
       for (const child of Array.from(doc.documentElement.children)) {
         if (child.tagName === 'parsererror') continue;
         // The app exporter's invisible frame-placeholder rect.
         if (child.tagName === 'rect' && child.getAttribute('fill') === 'none') continue;
-        root.appendChild(document.importNode(child, true));
+        wrap.appendChild(document.importNode(child, true));
       }
+      root.appendChild(wrap);
     }
   }
   return root;
@@ -694,7 +723,6 @@ function renderPanel(idx) {
   const scene = panel.scene;
   document.getElementById('m-scene').textContent =
     scene && !scene.synthetic ? scene.name : '—';
-  document.getElementById('m-shot').textContent = panel.meta.shot || '—';
   document.getElementById('m-code').textContent = panel.dispCode || '—';
   document.getElementById('m-dur').textContent  = panel.meta.dur.toFixed(2) + 's';
   document.getElementById('m-camera').textContent =
