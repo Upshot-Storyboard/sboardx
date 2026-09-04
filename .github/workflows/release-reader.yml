@@ -1,0 +1,16 @@
+name: Attach reader to release
+on:
+  release:
+    types: [published]
+permissions:
+  contents: write
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - run: gh release upload "${{ github.event.release.tag_name }}" reader/index.html#reader.html --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
