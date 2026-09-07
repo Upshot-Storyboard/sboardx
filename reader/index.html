@@ -25,6 +25,16 @@
     #dropzone p  { color: var(--text-dim); }
     #dropzone label { padding: 9px 20px; background: var(--accent); border-radius: 8px;
       cursor: pointer; font-weight: 500; color: #fff; }
+    /* Samples listed from samples.json beside the reader (hidden when absent). */
+    #samples { display: none; flex-direction: column; align-items: center; gap: 8px;
+      margin-top: 10px; }
+    #samples.on { display: flex; }
+    #samples button { padding: 7px 16px; background: var(--bg-panel); color: var(--text);
+      border: 1px solid var(--line); border-radius: 8px; font: inherit; cursor: pointer; }
+    #samples button:hover { border-color: var(--accent); }
+    #samples button:disabled { opacity: 0.6; cursor: default; }
+    #samples .credit { color: var(--text-dim); font-size: 11px; max-width: 420px;
+      text-align: center; }
     #dropzone input { display: none; }
     #dropzone a { color: var(--text-dim); }
     #drop-ring { position: fixed; inset: 12px; border: 2px dashed var(--accent);
@@ -136,6 +146,7 @@
   <p>Open a .sboardx storyboard file</p>
   <label>Choose file <input type="file" accept=".sboardx" id="file-input"></label>
   <p style="color:var(--text-dim);font-size:11px">or drag and drop anywhere</p>
+  <div id="samples"><p>or open a sample</p></div>
   <p style="font-size:11px"><a href="https://github.com/Upshot-Storyboard/sboardx">Format spec &amp; source</a></p>
 </div>
 <div id="drop-ring"></div>
@@ -214,6 +225,47 @@ document.body.addEventListener('drop', e => {
 document.getElementById('file-input').addEventListener('change', e => {
   if (e.target.files[0]) loadFile(e.target.files[0]);
 });
+
+// Samples: a `samples.json` next to this document lists .sboardx files to
+// offer — `{"files": [{"file": "Demo.sboardx", "name": "Demo", "credit": "…"}]}`,
+// paths relative to the manifest. The website ships one under /reader/; a
+// local copy with no manifest simply shows no list.
+(async () => {
+  let files;
+  try {
+    const res = await fetch('samples.json', { cache: 'no-cache' });
+    if (!res.ok) return;
+    files = (await res.json()).files;
+  } catch { return; }
+  if (!Array.isArray(files) || !files.length) return;
+  const box = document.getElementById('samples');
+  for (const f of files) {
+    if (!f || !f.file) continue;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = f.name || f.file;
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      const label = btn.textContent; btn.textContent = 'Loading…';
+      try {
+        const res = await fetch(new URL(f.file, new URL('samples.json', document.baseURI)));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await loadFile(new File([await res.arrayBuffer()], f.file.split('/').pop()));
+      } catch (err) {
+        alert(`Could not open ${f.file}: ${err.message}`);
+      } finally {
+        btn.disabled = false; btn.textContent = label;
+      }
+    });
+    box.appendChild(btn);
+    if (f.credit) {
+      const c = document.createElement('div');
+      c.className = 'credit'; c.textContent = f.credit;
+      box.appendChild(c);
+    }
+  }
+  box.classList.add('on');
+})();
 
 // ── Load project ─────────────────────────────────────────────────────────────
 
