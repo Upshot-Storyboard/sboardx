@@ -1,8 +1,11 @@
 # Samples
 
-- `minimal.sboardx` — two panels in one scene with a camera move, a vector
-  layer with blur, an image layer, and two audio tracks (one muted). This is
-  the Upshot exporter's test fixture, so the audio and image payloads are
-  stubs. It exercises every key in the spec.
+- `Demo.sboardx` — a short board exported from Upshot: three scenes, five
+  panels, camera moves, an image layer and a music track. Drop it on the
+  [reader](../reader/index.html) or unzip it.
 
-Real storyboards exported from Upshot: coming.
+## Credits
+
+The audio in `Demo.sboardx` is *Peer Gynt Suite No. 1, Op. 46 – I. Morning
+Mood* (Edvard Grieg), performed by the Musopen Symphony, from
+<https://musopen.org/music/777-peer-gynt-suite-no-1-op-46/>.

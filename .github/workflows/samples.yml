@@ -6,5 +6,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 examples/python/validate.py samples/*.sboardx
-      - run: python3 examples/python/list_panels.py samples/minimal.sboardx
-      - run: python3 examples/python/extract_art.py samples/minimal.sboardx /tmp/art && ls -R /tmp/art
+      - run: python3 examples/python/list_panels.py samples/Demo.sboardx
+      - run: python3 examples/python/extract_art.py samples/Demo.sboardx /tmp/art && ls -R /tmp/art
