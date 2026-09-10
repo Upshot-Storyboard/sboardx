@@ -6,81 +6,119 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
   <title>sboardx reader</title>
+  <!-- Same faces as the Upshot website; the stacks in --font-* fall back to
+       system fonts when offline. The favicon is injected by the script from
+       the inline #upshot-icon symbol below (one copy of the artwork). -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    /* Design tokens mirror the Upshot website (light theme only). */
     :root {
-      --bg: #1a1a1f; --bg-panel: #22222a; --bg-bar: #1c1c23;
-      --line: #2e2e38; --text: #e8e6e3; --text-dim: #8a8890;
-      --accent: #3b82f6;
+      color-scheme: light;
+      --bg: #ffffff; --bg-panel: #f5f8fc; --bg-canvas: #edf1f6;
+      --bg-bar: rgba(255,255,255,0.82);
+      --line: rgba(13,26,44,0.1); --hairline: rgba(13,26,44,0.08);
+      --input-border: rgba(13,26,44,0.18);
+      --text: #0d1a2c; --text-body: #4a5a6e; --text-dim: #7a8798;
+      --accent: #2a6fdb; --accent-hover: #1e56ae;
+      --accent-tint: rgba(42,111,219,0.08); --accent-border: rgba(42,111,219,0.3);
+      --font-ui: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --font-head: 'Space Grotesk', var(--font-ui);
+      --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+      --tl-h: 122px;
     }
     html, body { height: 100%; background: var(--bg); color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      font-size: 13px; overflow: hidden; }
+      font-family: var(--font-ui); font-size: 13px; overflow: hidden; }
+    button { font: inherit; cursor: pointer; }
 
     /* ── Drop zone ── */
     #dropzone { position: fixed; inset: 0; display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 14px; z-index: 100; }
-    #dropzone h1 { font-size: 22px; font-weight: 600; }
-    #dropzone p  { color: var(--text-dim); }
-    #dropzone label { padding: 9px 20px; background: var(--accent); border-radius: 8px;
-      cursor: pointer; font-weight: 500; color: #fff; }
+      align-items: center; justify-content: center; gap: 14px; z-index: 100;
+      padding: 24px; text-align: center; }
+    #dropzone h1 { font-family: var(--font-head); font-size: 22px; font-weight: 700; }
+    #dropzone p  { color: var(--text-body); }
+    #dropzone label { padding: 11px 24px; background: var(--accent); border-radius: 10px;
+      cursor: pointer; font-family: var(--font-head); font-weight: 700; font-size: 14px;
+      color: #fff; transition: background .15s ease; }
+    #dropzone label:hover { background: var(--accent-hover); }
     /* Samples listed from samples.json beside the reader (hidden when absent). */
     #samples { display: none; flex-direction: column; align-items: center; gap: 8px;
       margin-top: 10px; }
     #samples.on { display: flex; }
-    #samples button { padding: 7px 16px; background: var(--bg-panel); color: var(--text);
-      border: 1px solid var(--line); border-radius: 8px; font: inherit; cursor: pointer; }
-    #samples button:hover { border-color: var(--accent); }
+    #samples button { padding: 8px 16px; background: #fff; color: var(--text);
+      border: 1px solid var(--input-border); border-radius: 8px; font-weight: 500;
+      transition: background .15s ease, border-color .15s ease; }
+    #samples button:hover { background: var(--bg-panel); border-color: var(--accent-border); }
     #samples button:disabled { opacity: 0.6; cursor: default; }
     #samples .credit { color: var(--text-dim); font-size: 11px; max-width: 420px;
       text-align: center; }
     #dropzone input { display: none; }
-    #dropzone a { color: var(--text-dim); }
+    #dropzone a { color: var(--accent); text-decoration: none; }
+    #dropzone a:hover { color: var(--accent-hover); }
     #drop-ring { position: fixed; inset: 12px; border: 2px dashed var(--accent);
       border-radius: 14px; pointer-events: none; opacity: 0; transition: opacity .15s; }
     body.dragging #drop-ring { opacity: 1; }
 
     /* ── App shell ── */
-    #app { display: none; height: 100%; grid-template-rows: 44px 1fr 122px;
+    /* The timeline row height (--tl-h) is set from JS once the track count
+       is known; compact landscape overrides the template and drops it. */
+    #app { display: none; height: 100%; grid-template-rows: 44px 1fr var(--tl-h);
       grid-template-columns: 148px 1fr 220px;
       grid-template-areas: "hd hd hd" "strip canvas meta" "tl tl tl"; }
     #app.on { display: grid; }
 
     /* Header */
     #hd { grid-area: hd; display: flex; align-items: center; gap: 10px;
-      padding: 0 14px; background: var(--bg-bar); border-bottom: 1px solid var(--line); }
-    .brand { width: 28px; height: 28px; background: var(--accent); border-radius: 7px;
-      display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
-    #proj-title { font-weight: 600; font-size: 13px; }
+      padding: 0 14px; background: var(--bg-bar);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--hairline); }
+    .brand { width: 28px; height: 28px; flex-shrink: 0; display: block; }
+    #dropzone .brand { width: 56px; height: 56px; }
+    #proj-title { font-family: var(--font-head); font-weight: 600; font-size: 13px; }
     #proj-sub   { font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
     .hd-space { flex: 1; }
-    #timecode { font-family: 'SF Mono', monospace; font-size: 12px; color: var(--text-dim);
-      min-width: 64px; text-align: right; }
+    /* Prev / next: shown only in the compact layouts (no strip to click). */
+    .hd-nav { display: none; gap: 4px; }
+    .hd-nav button { width: 34px; height: 34px; border-radius: 8px;
+      background: var(--accent-tint); border: 1px solid var(--accent-border);
+      color: var(--accent); font-size: 20px; line-height: 1;
+      display: flex; align-items: center; justify-content: center; padding-bottom: 3px; }
+    .hd-nav button:hover { background: rgba(42,111,219,0.14); color: var(--accent-hover); }
+    #timecode { font-family: var(--font-mono); font-size: 12px; color: var(--text-dim);
+      min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; }
     #play-btn { width: 34px; height: 34px; border-radius: 50%; background: var(--accent);
-      border: none; cursor: pointer; color: #fff; font-size: 13px;
-      display: flex; align-items: center; justify-content: center; }
-    #play-btn:hover { filter: brightness(1.15); }
+      border: none; color: #fff; font-size: 13px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      transition: background .15s ease; }
+    #play-btn:hover { background: var(--accent-hover); }
 
     /* Panel strip */
     #strip { grid-area: strip; overflow-y: auto; overflow-x: hidden;
       border-right: 1px solid var(--line); background: var(--bg-panel);
       padding: 6px; display: flex; flex-direction: column; gap: 5px; }
-    .thumb { cursor: pointer; border-radius: 5px; overflow: hidden;
-      border: 2px solid transparent; background: #111; flex-shrink: 0; }
-    .thumb.active { border-color: var(--accent); }
-    .thumb-svg { width: 100%; aspect-ratio: 16/9; display: block; background: #fff; }
+    .thumb { cursor: pointer; border-radius: 8px; overflow: hidden;
+      border: 1px solid var(--line); background: #fff; flex-shrink: 0;
+      transition: border-color .15s ease, box-shadow .15s ease; }
+    .thumb:hover { border-color: var(--accent-border); }
+    .thumb.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-border); }
+    .thumb-svg { width: 100%; aspect-ratio: 16/9; display: block; background: #fff;
+      border-bottom: 1px solid var(--hairline); }
     .thumb svg  { width: 100%; height: 100%; display: block; }
     .thumb-info { padding: 2px 5px 4px; display: flex; justify-content: space-between;
-      font-size: 9px; font-family: monospace; color: var(--text-dim); }
+      font-size: 9px; font-family: var(--font-mono); color: var(--text-dim); }
 
     /* Canvas */
     #canvas-area { grid-area: canvas; display: flex; align-items: center;
-      justify-content: center; padding: 16px; background: var(--bg); overflow: hidden; }
+      justify-content: center; padding: 16px; background: var(--bg-canvas); overflow: hidden; }
     /* White wrap background: with wide shots (z < 1) the framed region is
        larger than the artwork's paper rect — paper extends beyond it. */
     #canvas-wrap { position: relative; max-width: 100%; max-height: 100%;
-      background: #fff; border-radius: 3px; overflow: hidden; }
+      background: #fff; border-radius: 8px; overflow: hidden;
+      box-shadow: 0 0 0 1px var(--line), 0 12px 32px rgba(13,26,44,0.10); }
     #canvas-wrap svg { position: absolute; inset: 0; width: 100%; height: 100%; }
     /* Inner wrapper that receives the scene's camera transform during
        playback (pan / zoom / rotate, sampled at the playhead). */
@@ -95,16 +133,19 @@
     #meta { grid-area: meta; padding: 14px; border-left: 1px solid var(--line);
       background: var(--bg-panel); overflow-y: auto;
       display: flex; flex-direction: column; gap: 14px; }
-    .mf label { font-size: 9px; color: var(--text-dim); text-transform: uppercase;
-      letter-spacing: .06em; display: block; margin-bottom: 3px; }
+    .mf label { font-family: var(--font-head); font-size: 10px; font-weight: 600;
+      color: var(--text-dim); text-transform: uppercase;
+      letter-spacing: .08em; display: block; margin-bottom: 3px; }
     .mf .v { font-size: 14px; font-weight: 500; }
-    .mf .note { font-size: 12px; color: var(--text-dim); line-height: 1.55;
+    .mf .note { font-size: 12px; color: var(--text-body); line-height: 1.55;
       white-space: pre-wrap; word-break: break-word; }
+    .meta-empty { display: none; font-size: 12px; color: var(--text-dim); }
 
     /* Timeline */
     #tl { grid-area: tl; border-top: 1px solid var(--line); background: var(--bg-panel);
       overflow: hidden; position: relative; }
-    #tl-scroll { overflow-x: auto; overflow-y: hidden; height: 100%; cursor: crosshair; }
+    #tl-scroll { overflow-x: auto; overflow-y: hidden; height: 100%; cursor: crosshair;
+      -webkit-overflow-scrolling: touch; touch-action: pan-x; }
     #tl-inner  { position: relative; height: 100%; }
     /* Scene strip: one colored band per scene + its camera keyframe
        diamonds. Hidden (height 0) for files without scenes. */
@@ -113,7 +154,7 @@
       font-size: 9px; font-weight: 600; letter-spacing: .04em; overflow: hidden;
       white-space: nowrap; display: flex; align-items: center; gap: 5px;
       padding: 0 6px; pointer-events: none; }
-    .sblock .sc-count { opacity: .55; font-weight: 400; font-family: monospace; }
+    .sblock .sc-count { opacity: .65; font-weight: 400; font-family: var(--font-mono); }
     .kf-diamond { position: absolute; top: 7px; width: 7px; height: 7px;
       transform: translateX(-50%) rotate(45deg); border-radius: 1px;
       pointer-events: none; z-index: 3; box-shadow: 0 0 0 1px var(--bg-panel); }
@@ -121,27 +162,80 @@
       border-top: 1.5px dashed currentColor; opacity: .55; }
     .tl-video { position: absolute; top: 22px; height: 56px; left: 0; }
     .pblock { position: absolute; top: 8px; height: 40px; border-radius: 5px;
-      background: #32323e; border: 1px solid transparent; overflow: hidden;
-      font-size: 9px; font-family: monospace; color: #9a9aaa;
-      display: flex; align-items: flex-end; padding: 0 5px 5px; cursor: pointer; }
-    .pblock.active { border-color: var(--accent); color: #fff; }
+      background: #fff; border: 1px solid var(--line); overflow: hidden;
+      font-size: 9px; font-family: var(--font-mono); color: var(--text-dim);
+      display: flex; align-items: flex-end; padding: 0 5px 5px; cursor: pointer;
+      transition: border-color .12s ease, background .12s ease; }
+    .pblock:hover { border-color: var(--accent-border); }
+    .pblock.active { border-color: var(--accent); color: var(--text); background: var(--accent-tint); }
     .tl-audio { position: absolute; top: 78px; left: 0; height: 36px; }
     .ablock { position: absolute; top: 4px; height: 28px; border-radius: 5px;
-      font-size: 9px; font-family: monospace; overflow: hidden; white-space: nowrap;
+      font-size: 9px; font-family: var(--font-mono); overflow: hidden; white-space: nowrap;
       display: flex; align-items: center; padding: 0 6px; }
-    .ak-music    { background: rgba(59,130,246,.25); border: 1px solid #3b82f6; color: #93c5fd; }
-    .ak-sfx      { background: rgba(16,185,129,.25); border: 1px solid #10b981; color: #6ee7b7; }
-    .ak-dialogue { background: rgba(245,158,11,.25); border: 1px solid #f59e0b; color: #fcd34d; }
+    .ak-music    { background: rgba(42,111,219,.14); border: 1px solid #2a6fdb; color: #1e56ae; }
+    .ak-sfx      { background: rgba(16,185,129,.16); border: 1px solid #10b981; color: #047857; }
+    .ak-dialogue { background: rgba(245,158,11,.18); border: 1px solid #f59e0b; color: #92400e; }
     #ph { position: absolute; top: 0; bottom: 0; width: 2px;
       background: var(--accent); pointer-events: none; z-index: 5; }
     #ph::before { content:''; position: absolute; top: 0; left: -4px;
       border: 5px solid transparent; border-top: 6px solid var(--accent); }
+
+    /* ── Compact layouts (phones) ──
+       Portrait: header, canvas, timeline. Landscape: header, canvas and a
+       notes-only meta rail (the timeline would not fit). body.compact is
+       mirrored from these queries in JS for the swipe handler. */
+    @media (max-width: 720px) and (orientation: portrait) {
+      #app.on { grid-template-columns: 1fr; grid-template-areas: "hd" "canvas" "tl"; }
+      #strip, #meta, #proj-sub { display: none; }
+      #hd { padding: 0 10px; gap: 8px; }
+      #timecode { min-width: 0; }
+      .hd-nav { display: flex; }
+      #canvas-area { padding: 10px; touch-action: pan-y; }
+    }
+    @media (max-height: 520px) and (orientation: landscape) {
+      #app.on { grid-template-rows: 44px 1fr; grid-template-columns: 1fr minmax(180px, 32%);
+        grid-template-areas: "hd hd" "canvas meta"; }
+      #strip, #tl, #proj-sub, .mf-info, #meta .mf.empty { display: none; }
+      #hd { padding: 0 10px; gap: 8px; }
+      #timecode { min-width: 0; }
+      .hd-nav { display: flex; }
+      #canvas-area { padding: 10px; touch-action: pan-y; }
+      #meta { padding: 12px; gap: 12px; }
+      #meta:has(#mf-dialogue.empty):has(#mf-note.empty) .meta-empty { display: block; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; }
+    }
   </style>
 </head>
 <body>
 
+<!-- Upshot mark (the website's app/icon.svg), referenced by the brand
+     <use> elements and serialised into the favicon at startup. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="upshot-icon" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" rx="229" fill="#f5f8fc"/>
+  <g transform="translate(102.4 132.8) scale(0.8) translate(-36.5 -76)">
+  <path fill="#ffffff" d="M 775.5,344.5 C 757.9,322.1 673.167,281.5 633,264 c -15.6,5.6 -20.5,36.667 -21,51.5 l 84.5,37.5 c -9.6,26 -39,53.167 -52.5,63.5 h -32 l 40.5,60 c 21.6,-14.4 91,-94 123,-132 z"/>
+  <path fill="#000000" d="m 633.35547,253.24805 -3.73438,1.33984 c -13.0213,4.67432 -18.69077,17.12391 -22.32422,28.70703 -3.63344,11.58312 -5.01187,23.5883 -5.29101,31.86914 l -0.22656,6.74024 81.38086,36.11718 C 672.70325,376.93871 651.77504,397.24374 640.3125,406.5 h -47.12695 l 56.58789,83.83594 8.27343,-5.51563 c 6.88158,-4.58771 15.15182,-12.36366 25.36915,-22.61914 10.21733,-10.25548 21.99287,-22.82749 34.08203,-36.12305 24.17831,-26.59111 49.57209,-56.04373 65.65039,-75.13671 l 5.24023,-6.22266 -5.02539,-6.39648 c -5.90164,-7.51118 -14.99035,-14.26896 -26.42969,-21.75586 -11.43933,-7.48691 -25.14486,-15.31882 -39.51757,-22.97852 -28.74544,-15.3194 -60.10285,-29.90324 -80.42188,-38.75586 z m 0.47461,22.1289 c 19.86582,8.77263 47.97553,21.89627 74.17969,35.86133 14.0314,7.4778 27.31933,15.09003 37.97265,22.0625 6.50507,4.25749 11.86413,8.32798 15.86328,11.76367 -15.9176,18.76747 -37.65145,43.92068 -59.14453,67.5586 -11.96084,13.15444 -23.58491,25.55587 -33.45508,35.46289 -5.59507,5.61596 -10.43928,10.12387 -14.57031,13.76172 L 630.81641,426.5 h 16.57226 l 2.68945,-2.05859 c 14.65331,-11.21575 44.68888,-37.87848 55.80274,-67.97852 l 3.25,-8.79883 -86.49414,-38.38476 c 0.61365,-6.19994 1.65567,-13.34641 3.74219,-19.99805 2.05149,-6.54 4.99491,-11.34483 7.45117,-13.9043 z"/>
+  <path fill="#ffffff" d="M 659.5,187 A 104.5,101 0 0 1 555,288 104.5,101 0 0 1 450.5,187 104.5,101 0 0 1 555,86 104.5,101 0 0 1 659.5,187 Z"/>
+  <path fill="#000000" d="m 555,76 c -62.93715,0 -114.5,49.62756 -114.5,111 0,61.37244 51.56285,111 114.5,111 62.93715,0 114.5,-49.62756 114.5,-111 C 669.5,125.62756 617.93715,76 555,76 Z m 0,20 c 52.49036,0 94.5,40.81092 94.5,91 0,50.18908 -42.00964,91 -94.5,91 -52.49036,0 -94.5,-40.81092 -94.5,-91 0,-50.18908 42.00964,-91 94.5,-91 z"/>
+  <path fill="#ffffff" d="m 273,891 c 10.8,-46.8 148.5,-433.667 211,-609.5 0,0 75.5,-49 134,0 C 594,482.5 783,729 846.5,835 781.3,784.2 730.5,830.833 715,867.5 675.5,805.5 567.5,608 519.5,506 477,569.5 380,923.5 380,923.5 348.353,880.974 293.069,888.33 273.636,890.915 Z"/>
+  <path fill="#000000" d="m 561.52344,249.87891 c -12.38778,-0.4745 -24.2274,1.05137 -34.73828,3.50976 -28.02902,6.55571 -48.22852,19.72266 -48.22852,19.72266 l -2.84375,1.8457 -1.13477,3.19336 c -31.24894,87.91352 -81.30391,228.60091 -124.90429,353.18359 -21.80019,62.29135 -41.98634,120.55306 -57.41211,166.21289 -15.42578,45.65984 -25.9377,77.90974 -29.00586,91.20508 l -3.24805,14.07422 14.95313,-2 -0.006,0.002 c 19.43369,-2.58509 69.03611,-8.96569 97.02344,28.64258 l 12.24609,16.45508 5.41992,-19.7832 c 0,0 24.21934,-88.3849 53.72852,-184.64844 14.75458,-48.13177 30.83375,-98.22935 45.8164,-140.10156 10.82362,-30.2489 21.29014,-56.19357 29.77735,-73.6211 51.31963,106.05132 149.44013,285.20567 187.59961,345.10157 l 10.23046,16.05859 7.41407,-17.53711 c 6.81645,-16.12508 22.1732,-35.21591 41.88281,-43.77148 19.70961,-8.55558 43.82327,-8.4487 74.25977,15.26562 l 14.7246,-13.02734 C 822.83658,776.04079 760.07486,688.45212 708.30273,589.24805 656.53061,490.04398 616.35313,379.63922 627.92969,282.68555 l 0.64258,-5.375 -4.1504,-3.47657 c -20.08205,-16.82086 -42.25214,-23.16424 -62.89843,-23.95507 z m -1.04883,19.8164 c 15.5536,0.48294 31.75455,5.10977 47.08203,16.55078 -10.17352,102.41672 31.40714,213.36535 83.01563,312.25586 43.05124,82.4934 93.11106,156.48798 127.10937,209.37891 -21.96031,-7.4693 -42.51047,-6.0004 -59.55078,1.39648 -19.12524,8.30191 -33.80462,22.80522 -43.68359,38.10157 C 670.311,774.85774 573.1554,596.53116 528.54883,501.74219 l -7.52735,-15.99414 -9.83203,14.68945 c -12.0358,17.98291 -25.67406,51.85463 -40.83203,94.2168 -15.15797,42.36216 -31.29755,92.67083 -46.10547,140.97656 -25.09411,81.86093 -43.15059,146.6744 -49.05859,168.00976 -28.43954,-25.21881 -65.55346,-26.05016 -88.3457,-24.17382 4.56345,-15.52105 12.35758,-39.98685 24.36132,-75.51758 15.38361,-45.53501 35.55449,-103.75328 57.3418,-166.00781 43.12142,-123.21411 92.35776,-261.62168 123.66797,-349.70508 5.65272,-3.26497 20.18402,-10.94581 39.12109,-15.375 9.12975,-2.13536 18.98812,-3.48107 29.13477,-3.16602 z"/>
+  <path fill="#000000" d="m 552,436.5 c -62.8,2.4 -106.167,15.667 -120,22 l -13,45.5 -51,221 -66,83 c -8,23.167 -24.8,70.5 -28,74.5 -3.2,4 70.667,19 108,26 L 519,512 702.5,860.5 835,816 C 813,799.5 673.833,539 616.5,409.5 h -45 l 206,359.5 -107,-149 9,78 z"/>
+  <path fill="#ffffff" d="m 334.5,421.5 c 12.8,-19.6 109.333,-104.167 156,-144 L 456,353 388.5,416.5 c 11.5,28 21.667,35.667 28.5,41.5 l -20.5,53.5 c -24.4,-21.6 -51.5,-69 -62,-90 z"/>
+  <path fill="#000000" d="m 484.00781,269.89453 c -23.40171,19.97473 -59.23923,51.10695 -90.91797,79.7793 -15.83936,14.33617 -30.63116,28.04773 -42.36328,39.5039 -11.73212,11.45618 -20.05327,19.89195 -24.59961,26.85352 l -3.13867,4.80664 2.56836,5.13477 c 10.88617,21.77233 37.22942,69.03871 64.31445,93.01562 l 10.80469,9.5625 28.18945,-73.57031 -5.37304,-4.58594 c -6.63821,-5.66672 -13.51782,-10.37485 -23.00391,-31.44336 l 63.79297,-60.01172 35.31445,-77.2832 z m -21.67383,45.18359 -14.61523,31.98243 -71.08398,66.87109 2.61523,6.36719 c 9.32774,22.71102 19.0312,34.02367 25.94531,40.5625 l -12.40625,32.375 c -17.83049,-20.58208 -36.54728,-52.04639 -46.27734,-70.55274 3.71578,-4.38459 9.60076,-10.81053 18.1875,-19.19531 11.42616,-11.15741 26.08329,-24.75162 41.81055,-38.98633 18.52873,-16.77031 37.74095,-33.67263 55.82421,-49.42383 z"/>
+  <path fill="#ffffff" d="m 880.5,850.5 c -25.5,-33 -96.8,-79.2 -178,0 z"/>
+  <path fill="#ffffff" d="M 361,897 C 330.833,874.667 260.8,850.2 222,931 Z"/>
+  <path fill="#000000" d="m 801.00586,796.99805 c -31.59471,-1.81487 -68.43808,10.20611 -105.48828,46.34375 L 677.92578,860.5 h 222.93945 l -12.45312,-16.11523 c -14.1267,-18.28162 -39.92601,-39.44078 -74.20313,-45.79297 -4.28464,-0.79403 -8.68959,-1.33449 -13.20312,-1.59375 z m -12.60352,19.89257 c 7.75558,-0.48928 15.15014,0.0677 22.16211,1.36719 18.21064,3.37478 34.05771,12.34569 46.09375,22.24219 H 729.85156 c 21.1974,-15.60643 40.84206,-22.49218 58.55078,-23.60938 z"/>
+  <path fill="#000000" d="m 294.28125,865.33594 c -29.39558,1.34059 -60.70813,18.46447 -81.29492,61.33593 l -9.15821,19.06836 180.25782,-44.09179 -17.13672,-12.68555 C 350.29504,876.6336 323.67683,863.99534 294.28125,865.33594 Z m 0.91211,19.97851 c 13.5073,-0.616 27.17957,2.93096 38.93555,7.96485 l -91.38868,22.35351 c 15.92302,-22.05314 34.24239,-29.48785 52.45313,-30.31836 z"/>
+  <path fill="#000000" d="M 783.21875,842.68945 C 563.80987,843.30297 292.75223,878.00607 36.5,990.97852 V 1024 h 1024 V 861.11133 C 985.64461,850.25675 890.61947,842.38914 783.21875,842.68945 Z"/>
+  </g>
+  </symbol>
+</svg>
+
 <div id="dropzone">
-  <div class="brand">◼</div>
+  <svg class="brand" aria-hidden="true"><use href="#upshot-icon"/></svg>
   <h1>sboardx reader</h1>
   <p>Open a .sboardx storyboard file</p>
   <label>Choose file <input type="file" accept=".sboardx" id="file-input"></label>
@@ -153,12 +247,16 @@
 
 <div id="app">
   <div id="hd">
-    <div class="brand">◼</div>
+    <svg class="brand" aria-hidden="true"><use href="#upshot-icon"/></svg>
     <div>
       <div id="proj-title">—</div>
       <div id="proj-sub">—</div>
     </div>
     <div class="hd-space"></div>
+    <div class="hd-nav">
+      <button id="prev-btn" title="Previous panel  (←)">‹</button>
+      <button id="next-btn" title="Next panel  (→)">›</button>
+    </div>
     <span id="timecode">00:00:00</span>
     <button id="play-btn" title="Play / Pause  (Space)">▶</button>
   </div>
@@ -170,12 +268,13 @@
   </div>
 
   <div id="meta">
-    <div class="mf"><label>Scene</label><div class="v" id="m-scene">—</div></div>
-    <div class="mf"><label>Panel</label><div class="v" id="m-code">—</div></div>
-    <div class="mf"><label>Duration</label><div class="v" id="m-dur">—</div></div>
-    <div class="mf"><label>Camera</label><div class="v" id="m-camera" style="font-size:12px">—</div></div>
-    <div class="mf"><label>Dialogue</label><div class="note" id="m-dialogue"></div></div>
-    <div class="mf"><label>Note</label><div class="note" id="m-note"></div></div>
+    <div class="mf mf-info"><label>Scene</label><div class="v" id="m-scene">—</div></div>
+    <div class="mf mf-info"><label>Panel</label><div class="v" id="m-code">—</div></div>
+    <div class="mf mf-info"><label>Duration</label><div class="v" id="m-dur">—</div></div>
+    <div class="mf mf-info"><label>Camera</label><div class="v" id="m-camera" style="font-size:12px">—</div></div>
+    <div class="mf" id="mf-dialogue"><label>Dialogue</label><div class="note" id="m-dialogue"></div></div>
+    <div class="mf" id="mf-note"><label>Note</label><div class="note" id="m-note"></div></div>
+    <p class="meta-empty">No dialogue or notes for this panel.</p>
   </div>
 
   <div id="tl">
@@ -211,7 +310,33 @@ const S = {
 };
 
 // Scene tag colors: the app's five accent swatches, by scene index mod 5.
-const SCENE_PALETTE = ['#3b82f6', '#7a5af0', '#19b3a6', '#f0772e', '#e0455e'];
+const SCENE_PALETTE = ['#2a6fdb', '#7a5af0', '#19b3a6', '#f0772e', '#e0455e'];
+
+// ── Favicon ──────────────────────────────────────────────────────────────────
+// Built from the inline #upshot-icon symbol so the artwork ships once.
+{
+  const sym = document.getElementById('upshot-icon');
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${sym.getAttribute('viewBox')}">${sym.innerHTML}</svg>`;
+  const href = 'data:image/svg+xml,' + encodeURIComponent(svg);
+  for (const rel of ['icon', 'apple-touch-icon']) {
+    const link = document.createElement('link');
+    link.rel = rel; link.type = 'image/svg+xml'; link.href = href;
+    document.head.appendChild(link);
+  }
+}
+
+// ── Layout mode ──────────────────────────────────────────────────────────────
+// Mirrors the compact media queries in the stylesheet onto body.compact so
+// touch navigation only engages when the strip/timeline are hidden.
+const COMPACT_QUERIES = [
+  matchMedia('(max-width: 720px) and (orientation: portrait)'),
+  matchMedia('(max-height: 520px) and (orientation: landscape)'),
+];
+function syncCompact() {
+  document.body.classList.toggle('compact', COMPACT_QUERIES.some(q => q.matches));
+}
+COMPACT_QUERIES.forEach(q => q.addEventListener('change', syncCompact));
+syncCompact();
 
 // ── Drop / file open ─────────────────────────────────────────────────────────
 
@@ -354,11 +479,18 @@ async function loadFile(file) {
   buildUI();
 }
 
-// Keep the canvas sized to the viewport (also covers any load-order path
-// where the first layout pass wasn't live yet).
-window.addEventListener('resize', () => {
-  if (S.panels.length) renderPanel(S.currentIdx);
-});
+// Keep the canvas sized to its area: window resizes, device rotation, the
+// compact layouts swapping columns, and the embedding iframe changing size
+// all end up here (also covers any load-order path where the first layout
+// pass wasn't live yet).
+{
+  const refit = () => { if (S.panels.length) renderPanel(S.currentIdx); };
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(refit).observe(document.getElementById('canvas-area'));
+  } else {
+    window.addEventListener('resize', refit);
+  }
+}
 
 // ── Scenes ───────────────────────────────────────────────────────────────────
 //
@@ -608,11 +740,12 @@ function buildTimeline() {
   });
 
   // One 36px row per audio track; muted rows render dimmed. The timeline
-  // grid row grows to fit (78px of ruler/video + N*36 + 8 padding).
+  // grid row grows to fit (78px of ruler/video + N*36 + 8 padding). Set
+  // through --tl-h rather than an inline grid-template-rows so the compact
+  // landscape media query can still drop the row.
   const nTracks = Math.max(1, S.tracks.length);
   audio.style.height = (nTracks * 36) + 'px';
-  document.getElementById('app').style.gridTemplateRows =
-    `44px 1fr ${78 + nTracks * 36 + 8}px`;
+  document.getElementById('app').style.setProperty('--tl-h', `${78 + nTracks * 36 + 8}px`);
   for (const clip of S.clips) {
     const ti = Math.min(Math.max(clip.track ?? 0, 0), nTracks - 1);
     const el = document.createElement('div');
@@ -757,7 +890,9 @@ function renderPanel(idx) {
   // layout isn't live (a 0-size area would collapse the canvas); the resize
   // listener re-renders once real geometry exists.
   const area = wrap.parentElement;
-  const aw = area.clientWidth - 32, ah = area.clientHeight - 32;
+  const cs = getComputedStyle(area);
+  const aw = area.clientWidth  - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const ah = area.clientHeight - parseFloat(cs.paddingTop)  - parseFloat(cs.paddingBottom);
   if (aw > 0 && ah > 0) {
     const scale = Math.min(aw / w, ah / h);
     wrap.style.width  = Math.round(w * scale) + 'px';
@@ -781,6 +916,9 @@ function renderPanel(idx) {
     (scene && camSummary(scene.kfs)) || '—';
   document.getElementById('m-dialogue').textContent = panel.meta.dialogue || '';
   document.getElementById('m-note').textContent = panel.meta.note || '';
+  // The compact landscape rail shows only these two and hides empty ones.
+  document.getElementById('mf-dialogue').classList.toggle('empty', !panel.meta.dialogue);
+  document.getElementById('mf-note').classList.toggle('empty', !panel.meta.note);
 
   // Strip highlight
   document.querySelectorAll('.thumb').forEach(el => {
@@ -937,19 +1075,40 @@ function fmtTimecode(s) {
   return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}:${String(f).padStart(2,'0')}`;
 }
 
-// ── Keyboard ──────────────────────────────────────────────────────────────────
+// ── Navigation: keyboard, header buttons, swipe ──────────────────────────────
+
+function nextPanel() { seekToPanel(Math.min(S.currentIdx + 1, S.panels.length - 1)); }
+function prevPanel() { seekToPanel(Math.max(S.currentIdx - 1, 0)); }
 
 document.addEventListener('keydown', e => {
   if (!document.getElementById('app').classList.contains('on')) return;
   if (e.key === ' ') { e.preventDefault(); togglePlay(); }
-  if (e.key === 'ArrowRight') { e.preventDefault(); seekToPanel(Math.min(S.currentIdx + 1, S.panels.length - 1)); }
-  if (e.key === 'ArrowLeft')  { e.preventDefault(); seekToPanel(Math.max(S.currentIdx - 1, 0)); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); nextPanel(); }
+  if (e.key === 'ArrowLeft')  { e.preventDefault(); prevPanel(); }
 });
 
 document.getElementById('play-btn').addEventListener('click', togglePlay);
+document.getElementById('next-btn').addEventListener('click', nextPanel);
+document.getElementById('prev-btn').addEventListener('click', prevPanel);
 
-// Resize: recalculate canvas size
-window.addEventListener('resize', () => { if (S.panels.length) renderPanel(S.currentIdx); });
+// Horizontal swipe on the canvas steps panels in the compact layouts, where
+// the strip (and in landscape the timeline) are hidden.
+{
+  const area = document.getElementById('canvas-area');
+  let sx = 0, sy = 0, tracking = false;
+  area.addEventListener('pointerdown', e => {
+    tracking = document.body.classList.contains('compact') && e.isPrimary;
+    sx = e.clientX; sy = e.clientY;
+  });
+  area.addEventListener('pointerup', e => {
+    if (!tracking || !S.panels.length) return;
+    tracking = false;
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+    if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) return;
+    if (dx < 0) nextPanel(); else prevPanel();
+  });
+  area.addEventListener('pointercancel', () => { tracking = false; });
+}
 </script>
 </body>
 </html>
