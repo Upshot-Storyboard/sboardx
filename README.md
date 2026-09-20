@@ -5,10 +5,12 @@ of JSON (structure, timing, audio, camera) plus one plain SVG per layer of
 art. Anything that can unzip a file can read it, and the SVGs open in any
 vector tool.
 
-Upshot Storyboard writes and reads it; This repro provides experimental Toon Boom 
-Storyboard Pro scripts in [`toon-boom/`](toon-boom/). This repo is the format's
-home: the spec, a browser reader, the Toon Boom bridge, sample files and a few
-scripts.
+sboardx was born while building [Upshot Storyboard](https://www.upshotstoryboard.com/):
+the app needed a project file that other tools could open too, so its format
+was made open instead of proprietary. Upshot Storyboard writes and reads it
+natively, and this repo provides experimental Toon Boom Storyboard Pro scripts
+in [`toon-boom/`](toon-boom/). This repo is the format's home: the spec, a
+browser reader, the Toon Boom bridge, sample files and a few scripts.
 
 ## Open a .sboardx
 
