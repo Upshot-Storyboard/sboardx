@@ -51,7 +51,14 @@ function makeProgress(title, quiet) {
                 QCoreApplication.processEvents();
                 return;
             }
-        } catch (e3) { note("processEvents", e3); }
+        } catch (e3) { note("QCoreApplication.processEvents", e3); }
+        try {
+            if (typeof QApplication != "undefined" &&
+                typeof QApplication.processEvents == "function") {
+                QApplication.processEvents();
+                return;
+            }
+        } catch (e7) { note("QApplication.processEvents", e7); }
         try { for (var i = 0; i < 10; i++) System.processOneEvent(); }
         catch (e4) { note("processOneEvent", e4); }
     };
@@ -59,8 +66,11 @@ function makeProgress(title, quiet) {
         try {
             dlg = new QProgressDialog(title, "Cancel", 0, 100);
             dlg.setWindowTitle(title);
+            // Modal matters: QProgressDialog only pumps events inside
+            // setValue() when it is modal.
             try { dlg.setWindowModality(enumOr(Qt.WindowModal, 1)); }
             catch (e5) { note("setWindowModality", e5); }
+            try { dlg.setModal(true); } catch (e8) { note("setModal", e8); }
             dlg.setMinimumDuration(0);
             dlg.setAutoClose(false);
             dlg.setAutoReset(false);
