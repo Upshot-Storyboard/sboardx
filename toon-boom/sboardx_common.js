@@ -29,6 +29,13 @@ function makeLog(prefix, quiet) {
 // A window-modal progress dialog with a Cancel button. Every method is safe
 // to call when the dialog could not be created (batch mode, or a build
 // without the QProgressDialog binding): it then does nothing.
+//
+// Probed on SBP: the binding exposes Qt *slots* as methods (setValue,
+// setLabelText, setRange, setMinimumDuration, show, close, repaint) and
+// Q_PROPERTYs as plain properties (autoClose, windowModality, wasCanceled,
+// minimumWidth). Ordinary methods such as setAutoClose() or setModal() are
+// "not a function", so everything non-slot goes through properties, and
+// each optional call is isolated so one failure cannot lose the dialog.
 function makeProgress(title, quiet) {
     var dlg = null;
     var done = 0, total = 0;
@@ -40,6 +47,13 @@ function makeProgress(title, quiet) {
         reported[what] = true;
         try { MessageLog.trace("[sboardx] progress dialog: " + what + " failed: " + e); }
         catch (e2) {}
+    };
+    // Set a Qt property, trying the setter slot first when one exists.
+    var set = function (prop, setter, value) {
+        try {
+            if (typeof dlg[setter] == "function") { dlg[setter](value); return; }
+        } catch (e) { note(setter, e); }
+        try { dlg[prop] = value; } catch (e2) { note(prop, e2); }
     };
     // The script keeps the UI thread busy, so the dialog only repaints when
     // we make it: force a paint, then drain a burst of pending events.
@@ -65,22 +79,22 @@ function makeProgress(title, quiet) {
     if (!quiet) {
         try {
             dlg = new QProgressDialog(title, "Cancel", 0, 100);
-            dlg.setWindowTitle(title);
-            // Modal matters: QProgressDialog only pumps events inside
-            // setValue() when it is modal.
-            try { dlg.setWindowModality(enumOr(Qt.WindowModal, 1)); }
-            catch (e5) { note("setWindowModality", e5); }
-            try { dlg.setModal(true); } catch (e8) { note("setModal", e8); }
-            dlg.setMinimumDuration(0);
-            dlg.setAutoClose(false);
-            dlg.setAutoReset(false);
-            dlg.setMinimumWidth(420);
-            dlg.show();
-            pump();
         } catch (e6) {
             note("create", e6);
             dlg = null;
         }
+    }
+    if (dlg) {
+        set("windowTitle", "setWindowTitle", title);
+        // Modal matters: QProgressDialog only pumps events inside
+        // setValue() when it is modal.
+        set("windowModality", "setWindowModality", enumOr(Qt.WindowModal, 1));
+        set("minimumDuration", "setMinimumDuration", 0);
+        set("autoClose", "setAutoClose", false);
+        set("autoReset", "setAutoReset", false);
+        set("minimumWidth", "setMinimumWidth", 420);
+        try { dlg.show(); } catch (e9) { note("show", e9); }
+        pump();
     }
     return {
         // Total number of steps (0 = busy indicator with no known length).
@@ -95,7 +109,7 @@ function makeProgress(title, quiet) {
             if (!dlg) return;
             done++;
             try {
-                dlg.setLabelText(done + " of " + total + " \u2014 " + label);
+                dlg.setLabelText(done + " of " + total + " — " + label);
                 dlg.setValue(done);
                 pump();
             } catch (e) { note("step", e); }
@@ -108,12 +122,20 @@ function makeProgress(title, quiet) {
         },
         cancelled: function () {
             if (!dlg) return false;
-            try { return dlg.wasCanceled() === true; } catch (e) { return false; }
+            try {
+                var c = dlg.wasCanceled;
+                if (typeof c == "function") c = dlg.wasCanceled();
+                return c === true;
+            } catch (e) { note("wasCanceled", e); return false; }
         },
         close: function () {
             if (!dlg) return;
-            try { dlg.close(); pump(); } catch (e) {}
-            dlg = null;
+            var d = dlg;
+            dlg = null;   // pump() must not repaint a dialog being deleted
+            try { d.close(); } catch (e) { note("close", e); }
+            try { d.hide(); } catch (e2) {}
+            try { d.deleteLater(); } catch (e3) {}
+            pump();
         }
     };
 }
