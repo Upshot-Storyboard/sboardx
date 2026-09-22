@@ -26,6 +26,70 @@ function makeLog(prefix, quiet) {
     };
 }
 
+// A window-modal progress dialog with a Cancel button. Every method is safe
+// to call when the dialog could not be created (batch mode, or a build
+// without the QProgressDialog binding): it then does nothing.
+function makeProgress(title, quiet) {
+    var dlg = null;
+    var done = 0;
+    var pump = function () {
+        try {
+            if (typeof QCoreApplication != "undefined" &&
+                typeof QCoreApplication.processEvents == "function") {
+                QCoreApplication.processEvents();
+                return;
+            }
+        } catch (e) {}
+        try { System.processOneEvent(); } catch (e2) {}
+    };
+    if (!quiet) {
+        try {
+            dlg = new QProgressDialog(title, "Cancel", 0, 100);
+            dlg.setWindowTitle(title);
+            try { dlg.setWindowModality(enumOr(Qt.WindowModal, 1)); } catch (e3) {}
+            dlg.setMinimumDuration(0);
+            dlg.setAutoClose(false);
+            dlg.setAutoReset(false);
+            dlg.setMinimumWidth(420);
+            dlg.show();
+            pump();
+        } catch (e4) {
+            dlg = null;
+        }
+    }
+    return {
+        // Total number of steps (0 = busy indicator with no known length).
+        begin: function (total) {
+            if (!dlg) return;
+            done = 0;
+            try { dlg.setRange(0, total); dlg.setValue(0); pump(); } catch (e) {}
+        },
+        // Advance one step, showing what is being worked on.
+        step: function (label) {
+            if (!dlg) return;
+            try {
+                dlg.setLabelText(label);
+                dlg.setValue(++done);
+                pump();
+            } catch (e) {}
+        },
+        // Switch to a busy indicator for a phase with no step count.
+        busy: function (label) {
+            if (!dlg) return;
+            try { dlg.setLabelText(label); dlg.setRange(0, 0); pump(); } catch (e) {}
+        },
+        cancelled: function () {
+            if (!dlg) return false;
+            try { return dlg.wasCanceled() === true; } catch (e) { return false; }
+        },
+        close: function () {
+            if (!dlg) return;
+            try { dlg.close(); pump(); } catch (e) {}
+            dlg = null;
+        }
+    };
+}
+
 function readTextFile(path) {
     var f = new File(path);
     if (!f.exists) return null;
@@ -82,17 +146,16 @@ function enumOr(value, fallback) {
     return value === undefined || value === null ? fallback : value;
 }
 
-// External processes are given this long before being terminated.
-var PROCESS_TIMEOUT_MS = 120000;
-
-// Runs a command through Process2 and waits for it. Returns
-// { code, timedOut, elapsedMs, message }: `code` is 0 on a clean exit,
-// the process's error code otherwise, and -1 when it could not be started
-// or was killed at the timeout. `message` is Process2's own error text when
-// the API provides one. Warns on a timeout so the cause is visible.
-function runProcess(args, warn) {
+// Runs a command through Process2 and waits for it, pumping the event loop
+// so a progress dialog stays live. There is no time limit; an optional
+// isCancelled() callback (the dialog's Cancel button) terminates the
+// process instead. Returns { code, cancelled, elapsedMs, message }: `code`
+// is 0 on a clean exit, the process's error code otherwise, and -1 when it
+// could not be started or was cancelled. `message` is Process2's own error
+// text when the API provides one.
+function runProcess(args, warn, isCancelled) {
     var failed = function (message) {
-        return { code: -1, timedOut: false, elapsedMs: 0, message: message };
+        return { code: -1, cancelled: false, elapsedMs: 0, message: message };
     };
     if (typeof Process2 == "undefined") {
         if (warn) warn("the Process2 scripting API is unavailable");
@@ -117,22 +180,24 @@ function runProcess(args, warn) {
     }
     var t0 = new Date().getTime();
     var launchCode = p.launch();
-    while (p.isAlive() && new Date().getTime() - t0 < PROCESS_TIMEOUT_MS) {
+    var cancelled = false;
+    while (p.isAlive()) {
         System.processOneEvent();
+        if (isCancelled && isCancelled()) { cancelled = true; break; }
     }
     var elapsedMs = new Date().getTime() - t0;
     var message = "";
     try {
         if (typeof p.errorMessage == "function") message = String(p.errorMessage() || "");
     } catch (e2) {}
-    if (p.isAlive()) {
+    if (cancelled) {
         p.terminate();
-        if (warn) warn("'" + a[0] + "' was still running after " +
-            Math.round(PROCESS_TIMEOUT_MS / 1000) + " s and was terminated");
-        return { code: -1, timedOut: true, elapsedMs: elapsedMs, message: message };
+        if (warn) warn("'" + a[0] + "' was cancelled after " +
+            Math.round(elapsedMs / 1000) + " s");
+        return { code: -1, cancelled: true, elapsedMs: elapsedMs, message: message };
     }
     var err = p.errorCode();
-    return { code: err !== 0 ? err : launchCode, timedOut: false,
+    return { code: err !== 0 ? err : launchCode, cancelled: false,
              elapsedMs: elapsedMs, message: message };
 }
 
@@ -169,7 +234,6 @@ function runCaptured(args, logPath, warn) {
 // Turns a runProcess result into a warning line naming the command.
 function describeProcessResult(name, r, warn) {
     var secs = (r.elapsedMs / 1000).toFixed(1) + " s";
-    if (r.timedOut) return;   // runProcess already warned
     warn("'" + name + "' " + (r.code === 0 ? "exited cleanly" : "failed with code " + r.code) +
          " after " + secs + " but produced no output file" +
          (r.message ? " (" + r.message + ")" : ""));
@@ -193,7 +257,8 @@ function extractZip(zipPath, destPath, warn) {
     return fileExists(destPath + "/project.json");
 }
 
-function createStoreZip(stagingDir, entries, zipPath, warn) {
+// Throws { sboardxCancelled: true } when isCancelled() stops the zip.
+function createStoreZip(stagingDir, entries, zipPath, warn, isCancelled) {
     try { new File(zipPath).remove(); } catch (e) {}
     if (fileExists(zipPath)) {
         warn("could not delete the existing " + zipPath +
@@ -201,10 +266,13 @@ function createStoreZip(stagingDir, entries, zipPath, warn) {
     }
     var tarArgs = ["tar", "--format=zip", "--options", "zip:compression=store",
                    "-cf", zipPath, "-C", stagingDir].concat(entries);
-    var r = runProcess(tarArgs, warn);
+    var r = runProcess(tarArgs, warn, isCancelled);
+    if (r.cancelled) {
+        try { new File(zipPath).remove(); } catch (e1) {}
+        throw { sboardxCancelled: true };
+    }
     if (fileExists(zipPath)) return true;
     describeProcessResult("tar", r, warn);
-    if (r.timedOut) return false;   // a hung command is not worth re-running
     // Diagnostic re-run with tar's own stderr and exit code captured.
     var logPath = stagingDir + "/tar-stderr.txt";
     var said = runCaptured(tarArgs, logPath, warn);
@@ -280,6 +348,7 @@ function cameraFields(frameH) {
 }
 
 exports.makeLog = makeLog;
+exports.makeProgress = makeProgress;
 exports.readTextFile = readTextFile;
 exports.writeTextFile = writeTextFile;
 exports.readJsonFile = readJsonFile;

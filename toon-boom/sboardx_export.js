@@ -21,25 +21,46 @@ function exportToFile(zipPath, quiet) {
     }
 
     var env = makeExportEnv(common, log, zipPath);
+    env.progress = common.makeProgress("Exporting .sboardx", quiet);
     try {
+        env.progress.begin(countPanels(env));
         walkProject(env);
         writeProjectJson(env);
         writeSequenceJson(env);
+        env.progress.busy("Copying audio\u2026");
         writeAudioClips(env);
+        env.progress.busy("Creating the .sboardx archive\u2026");
+        var warningsBefore = log.warnings.length;
+        if (!zipStagingFolder(env)) {
+            var details = log.warnings.slice(warningsBefore);
+            env.progress.close();
+            log.report("Could not create the .sboardx zip.\n\n" +
+                (details.length ? details.join("\n") + "\n\n" : "") +
+                "Zipping uses 'tar' (built into Windows 10+ and macOS).\n" +
+                "The staged files are in:\n" + env.stagingDir, true);
+            return;
+        }
     } catch (err) {
-        log.report("sboardx export failed: " + err, true);
+        env.progress.close();
+        if (err && err.sboardxCancelled) {
+            log.report("Export cancelled. Nothing was written to\n" + zipPath, true);
+        } else {
+            log.report("sboardx export failed: " + err, true);
+        }
         return;
     }
-    var warningsBefore = log.warnings.length;
-    if (!zipStagingFolder(env)) {
-        var details = log.warnings.slice(warningsBefore);
-        log.report("Could not create the .sboardx zip.\n\n" +
-            (details.length ? details.join("\n") + "\n\n" : "") +
-            "Zipping uses 'tar' (built into Windows 10+ and macOS).\n" +
-            "The staged files are in:\n" + env.stagingDir, true);
-        return;
-    }
+    env.progress.close();
     log.report(exportSummary(env), false);
+}
+
+// Panel count for the progress range; the same walk exportPanel takes.
+function countPanels(env) {
+    var n = 0;
+    var numScenes = env.sb.numberOfScenesInProject();
+    for (var s = 0; s < numScenes; s++) {
+        n += env.sb.numberOfPanelsInScene(env.sb.sceneInProject(s));
+    }
+    return n;
 }
 
 function sboardxCommon(quiet) {
@@ -109,6 +130,9 @@ function walkProject(env) {
         var scenePanels = [];
         for (var pi = 0; pi < numPanels; pi++) {
             var panelId = String(env.sb.panelInScene(sceneId, pi));
+            if (env.progress.cancelled()) throw { sboardxCancelled: true };
+            env.progress.step("Panel " + env.sb.nameOfPanel(panelId) +
+                              " (scene " + sceneName + ")");
             env.panelIds.push(panelId);
             scenePanels.push(panelId);
             exportPanel(env, sceneId, sceneName, panelId, camKfs);
@@ -706,7 +730,7 @@ function zipStagingFolder(env) {
     var entries = ["project.json", "sequence.json", "panels", "audio"];
     if (env.counts.rasterLayers > 0) entries.push("images");
     return env.common.createStoreZip(env.stagingDir, entries, env.zipPath,
-                                     env.log.warn);
+                                     env.log.warn, env.progress.cancelled);
 }
 
 function exportSummary(env) {
