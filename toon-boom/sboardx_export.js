@@ -30,9 +30,12 @@ function exportToFile(zipPath, quiet) {
         log.report("sboardx export failed: " + err, true);
         return;
     }
+    var warningsBefore = log.warnings.length;
     if (!zipStagingFolder(env)) {
+        var details = log.warnings.slice(warningsBefore);
         log.report("Could not create the .sboardx zip.\n\n" +
-            "Zipping needs 'tar' (Windows 10+ / macOS) on PATH.\n" +
+            (details.length ? details.join("\n") + "\n\n" : "") +
+            "Zipping uses 'tar' (built into Windows 10+ and macOS).\n" +
             "The staged files are in:\n" + env.stagingDir, true);
         return;
     }

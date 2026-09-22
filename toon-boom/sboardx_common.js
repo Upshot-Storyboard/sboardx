@@ -82,10 +82,21 @@ function enumOr(value, fallback) {
     return value === undefined || value === null ? fallback : value;
 }
 
+// External processes are given this long before being terminated.
+var PROCESS_TIMEOUT_MS = 120000;
+
+// Runs a command through Process2 and waits for it. Returns
+// { code, timedOut, elapsedMs, message }: `code` is 0 on a clean exit,
+// the process's error code otherwise, and -1 when it could not be started
+// or was killed at the timeout. `message` is Process2's own error text when
+// the API provides one. Warns on a timeout so the cause is visible.
 function runProcess(args, warn) {
+    var failed = function (message) {
+        return { code: -1, timedOut: false, elapsedMs: 0, message: message };
+    };
     if (typeof Process2 == "undefined") {
         if (warn) warn("the Process2 scripting API is unavailable");
-        return -1;
+        return failed("Process2 unavailable");
     }
     var a = args;
     var p;
@@ -98,23 +109,70 @@ function runProcess(args, warn) {
         else if (a.length === 13) p = new Process2(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12]);
         else {
             if (warn) warn("runProcess: unsupported arg count " + a.length);
-            return -1;
+            return failed("unsupported arg count " + a.length);
         }
     } catch (e) {
         if (warn) warn("could not create external process '" + a[0] + "': " + e);
-        return -1;
+        return failed(String(e));
     }
-    var launchCode = p.launch();
     var t0 = new Date().getTime();
-    while (p.isAlive() && new Date().getTime() - t0 < 120000) {
+    var launchCode = p.launch();
+    while (p.isAlive() && new Date().getTime() - t0 < PROCESS_TIMEOUT_MS) {
         System.processOneEvent();
     }
+    var elapsedMs = new Date().getTime() - t0;
+    var message = "";
+    try {
+        if (typeof p.errorMessage == "function") message = String(p.errorMessage() || "");
+    } catch (e2) {}
     if (p.isAlive()) {
         p.terminate();
-        return -1;
+        if (warn) warn("'" + a[0] + "' was still running after " +
+            Math.round(PROCESS_TIMEOUT_MS / 1000) + " s and was terminated");
+        return { code: -1, timedOut: true, elapsedMs: elapsedMs, message: message };
     }
     var err = p.errorCode();
-    return err !== 0 ? err : launchCode;
+    return { code: err !== 0 ? err : launchCode, timedOut: false,
+             elapsedMs: elapsedMs, message: message };
+}
+
+function psQuote(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
+function shQuote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+
+// Process2 does not expose the child's stderr, so to see what a failing
+// command actually said we run it again through a shell that redirects
+// stderr and the exit code into logPath. Returns the captured text, or null
+// when the wrapper itself produced nothing.
+function runCaptured(args, logPath, warn) {
+    try { new File(logPath).remove(); } catch (e) {}
+    if (about.isWindowsArch()) {
+        // Single quotes only, so nothing has to survive Process2's own
+        // argument quoting. PowerShell 5.1 wraps each stderr line in an
+        // error record, so the log is verbose but complete; a missing 'tar'
+        // lands in the catch.
+        var out = " | Out-File -Append -Encoding utf8 -LiteralPath " + psQuote(logPath);
+        var ps = "try { & " + args.map(psQuote).join(" ") + " 2> " + psQuote(logPath) +
+            " } catch { $_.ToString()" + out + " }; " +
+            "('exit code ' + $LASTEXITCODE)" + out;
+        runProcess(["powershell", "-NoProfile", "-Command", ps], warn);
+    } else {
+        var cmd = args.map(shQuote).join(" ") + " 2>" + shQuote(logPath) +
+                  "; echo \"exit code $?\" >>" + shQuote(logPath);
+        runProcess(["sh", "-c", cmd], warn);
+    }
+    var text = readTextFile(logPath);
+    if (text === null) return null;
+    text = String(text).replace(/^\s+|\s+$/g, "");
+    return text;
+}
+
+// Turns a runProcess result into a warning line naming the command.
+function describeProcessResult(name, r, warn) {
+    var secs = (r.elapsedMs / 1000).toFixed(1) + " s";
+    if (r.timedOut) return;   // runProcess already warned
+    warn("'" + name + "' " + (r.code === 0 ? "exited cleanly" : "failed with code " + r.code) +
+         " after " + secs + " but produced no output file" +
+         (r.message ? " (" + r.message + ")" : ""));
 }
 
 function extractZip(zipPath, destPath, warn) {
@@ -137,10 +195,31 @@ function extractZip(zipPath, destPath, warn) {
 
 function createStoreZip(stagingDir, entries, zipPath, warn) {
     try { new File(zipPath).remove(); } catch (e) {}
+    if (fileExists(zipPath)) {
+        warn("could not delete the existing " + zipPath +
+             " (is it open in another program?)");
+    }
     var tarArgs = ["tar", "--format=zip", "--options", "zip:compression=store",
                    "-cf", zipPath, "-C", stagingDir].concat(entries);
-    runProcess(tarArgs, warn);
-    if (!fileExists(zipPath) && about.isMacArch()) {
+    var r = runProcess(tarArgs, warn);
+    if (fileExists(zipPath)) return true;
+    describeProcessResult("tar", r, warn);
+    if (r.timedOut) return false;   // a hung command is not worth re-running
+    // Diagnostic re-run with tar's own stderr and exit code captured.
+    var logPath = stagingDir + "/tar-stderr.txt";
+    var said = runCaptured(tarArgs, logPath, warn);
+    if (said === null) {
+        warn("no output could be captured from 'tar' (the shell wrapper itself " +
+             "produced nothing)");
+    } else {
+        warn("'tar' said (" + logPath + "):\n" + (said || "(nothing)"));
+    }
+    if (fileExists(zipPath)) {
+        warn("the re-run through the shell produced the zip; only the direct " +
+             "launch of 'tar' from Storyboard Pro failed");
+        return true;
+    }
+    if (about.isMacArch()) {
         runProcess(["sh", "-c",
                     "cd '" + stagingDir + "' && /usr/bin/zip -r -X -0 '" +
                     zipPath + "' " + entries.join(" ")], warn);

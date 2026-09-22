@@ -138,7 +138,7 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
   "dur": 2.5,
   "note": "a note",
   "dialogue": "she said hi",
-  "x-upshot": { "sketch": "", "stroke_set": true, "layer_counter": 2 }
+  "x-upshot": { "sketch": "", "stroke_set": true, "layer_counter": 2, "name": "Crash" }
 }
 ```
 
@@ -150,7 +150,7 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
 | `dur` | seconds | Panel duration. > 0. |
 | `note` | string | Panel notes. May be empty. |
 | `dialogue` | string | Optional. Absent means empty. Maps to the *Dialogue* caption in Toon Boom. |
-| `x-upshot` | object | Optional vendor block. `stroke_set`/`layer_counter` let Upshot re-import its own files exactly; other readers ignore it. |
+| `x-upshot` | object | Optional vendor block. `stroke_set`/`layer_counter`/`name` (the user's custom part of `code`, e.g. `Crash` in `CHASE-Crash`) let Upshot re-import its own files exactly; other readers ignore it. |
 
 ### panels/\<id\>/layers.json
 
