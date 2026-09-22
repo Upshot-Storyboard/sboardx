@@ -31,52 +31,70 @@ function makeLog(prefix, quiet) {
 // without the QProgressDialog binding): it then does nothing.
 function makeProgress(title, quiet) {
     var dlg = null;
-    var done = 0;
+    var done = 0, total = 0;
+    var reported = {};
+    // Problems with the dialog must never break the export, but they should
+    // be visible once in the Message Log.
+    var note = function (what, e) {
+        if (reported[what]) return;
+        reported[what] = true;
+        try { MessageLog.trace("[sboardx] progress dialog: " + what + " failed: " + e); }
+        catch (e2) {}
+    };
+    // The script keeps the UI thread busy, so the dialog only repaints when
+    // we make it: force a paint, then drain a burst of pending events.
     var pump = function () {
+        try { if (dlg) dlg.repaint(); } catch (e) { note("repaint", e); }
         try {
             if (typeof QCoreApplication != "undefined" &&
                 typeof QCoreApplication.processEvents == "function") {
                 QCoreApplication.processEvents();
                 return;
             }
-        } catch (e) {}
-        try { System.processOneEvent(); } catch (e2) {}
+        } catch (e3) { note("processEvents", e3); }
+        try { for (var i = 0; i < 10; i++) System.processOneEvent(); }
+        catch (e4) { note("processOneEvent", e4); }
     };
     if (!quiet) {
         try {
             dlg = new QProgressDialog(title, "Cancel", 0, 100);
             dlg.setWindowTitle(title);
-            try { dlg.setWindowModality(enumOr(Qt.WindowModal, 1)); } catch (e3) {}
+            try { dlg.setWindowModality(enumOr(Qt.WindowModal, 1)); }
+            catch (e5) { note("setWindowModality", e5); }
             dlg.setMinimumDuration(0);
             dlg.setAutoClose(false);
             dlg.setAutoReset(false);
             dlg.setMinimumWidth(420);
             dlg.show();
             pump();
-        } catch (e4) {
+        } catch (e6) {
+            note("create", e6);
             dlg = null;
         }
     }
     return {
         // Total number of steps (0 = busy indicator with no known length).
-        begin: function (total) {
+        begin: function (n) {
             if (!dlg) return;
-            done = 0;
-            try { dlg.setRange(0, total); dlg.setValue(0); pump(); } catch (e) {}
+            done = 0; total = n;
+            try { dlg.setRange(0, n); dlg.setValue(0); pump(); }
+            catch (e) { note("begin", e); }
         },
         // Advance one step, showing what is being worked on.
         step: function (label) {
             if (!dlg) return;
+            done++;
             try {
-                dlg.setLabelText(label);
-                dlg.setValue(++done);
+                dlg.setLabelText(done + " of " + total + " \u2014 " + label);
+                dlg.setValue(done);
                 pump();
-            } catch (e) {}
+            } catch (e) { note("step", e); }
         },
         // Switch to a busy indicator for a phase with no step count.
         busy: function (label) {
             if (!dlg) return;
-            try { dlg.setLabelText(label); dlg.setRange(0, 0); pump(); } catch (e) {}
+            try { dlg.setLabelText(label); dlg.setRange(0, 0); pump(); }
+            catch (e) { note("busy", e); }
         },
         cancelled: function () {
             if (!dlg) return false;
