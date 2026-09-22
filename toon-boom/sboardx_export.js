@@ -93,7 +93,7 @@ function makeExportEnv(common, log, zipPath) {
         panelIds: [],
         scenes: [],
         counts: { scenes: 0, panels: 0, layers: 0, rasterLayers: 0,
-                  camScenes: 0, audioClips: 0, audioTracks: 0 }
+                  emptyLayers: 0, camScenes: 0, audioClips: 0, audioTracks: 0 }
     };
 }
 
@@ -173,9 +173,12 @@ function exportLayer(env, panelDir, panelId, li, rasterJobs) {
     var tvgPath = "";
     try { tvgPath = String(env.lm.getLayerDrawingName(panelId, li, true)); }
     catch (e2) {}
+    // A vector layer nobody has drawn on has no drawing file yet; an empty
+    // SVG is the right export for it, so this is only traced and counted.
     if (!tvgPath && !isBitmap) {
-        env.log.warn("no drawing file for panel " + panelId + " layer '" +
-                     layerName + "' - exported empty");
+        env.counts.emptyLayers++;
+        env.log.trace("no drawing file for panel " + panelId + " layer '" +
+                      layerName + "' - exported empty");
     }
 
     var art = layerSvg(env, !isBitmap && tvgPath ? { filename: tvgPath } : null,
@@ -724,6 +727,9 @@ function exportSummary(env) {
     if (c.rasterLayers > 0) {
         summary += "\n\nImage layers are rendered at the project resolution " +
                    "and cropped to the frame.";
+    }
+    if (c.emptyLayers > 0) {
+        summary += "\n\n" + c.emptyLayers + " empty layer(s) exported empty.";
     }
     summary += "\n\nGradients are approximated by their solid base color.";
     if (env.log.warnings.length > 0) {
