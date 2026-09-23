@@ -40,6 +40,12 @@ unbounded plane. The origin is the centre of the frame, y points down.
   factor (1 = full frame, 2 = twice as close) and `rot` the camera's
   rotation in degrees, clockwise on screen (content appears rotated by
   `−rot`).
+- A **layer pose** `{tx, ty, s, rot, opacity}` (a `layer_tracks` keyframe in
+  `sequence.json`) moves one layer's art before the camera applies. With
+  the track's pivot `c = (x, y)`:
+  `p' = c + (tx, ty) + S(s) · R(rot) · (p − c)`, `s` a uniform scale
+  (`> 0`, 1 = unchanged) and `rot` in degrees, clockwise on screen.
+  `opacity` (0–1, 1 = unchanged) multiplies the layer's `opacity / 100`.
 
 ## Entries
 
@@ -107,7 +113,18 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
           { "id": "k-1", "t": 0.0, "z": 1.0, "cx": 0.0,  "cy": 0.0,   "rot": 0.0 },
           { "id": "k-2", "t": 2.0, "z": 1.5, "cx": 48.0, "cy": -27.0, "rot": 15.0 }
         ]
-      }
+      },
+      "layer_tracks": [
+        {
+          "name": "Shading",
+          "kind": "layer",
+          "pivot": { "x": 10.0, "y": -5.0 },
+          "keyframes": [
+            { "id": "lk-1", "t": 0.0, "tx": 0.0,  "ty": 0.0,   "s": 1.0,  "rot": 0.0,   "opacity": 1.0 },
+            { "id": "lk-2", "t": 1.5, "tx": 24.0, "ty": -12.0, "s": 1.25, "rot": -10.0, "opacity": 0.5 }
+          ]
+        }
+      ]
     }
   ],
   "transitions": []
@@ -125,6 +142,21 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
   interpolates `z` geometrically; other readers may interpolate linearly.
   Before the first keyframe hold the first pose; after the last hold the
   last. No keyframes = static full frame.
+- `layer_tracks` (optional, default none): the scene's **layer
+  animation**. Each track animates every layer of the scene's panels that
+  matches it by NAME — `kind: "layer"` matches `layers.json` entries whose
+  `name` equals the track's `name`, `kind: "group"` matches entries whose
+  `group` equals it. Readers skip tracks with an unknown `kind`. A track
+  therefore continues across the panels of its scene (a panel that has no
+  matching layer is simply unaffected) and ends at the scene boundary.
+  `pivot` is a world point (default the origin). `keyframes` are sorted by
+  `t`, seconds local to the scene like the camera's; each carries the pose
+  fields of "Coordinate system" (`s > 0`, `opacity` 0–1). Between
+  keyframes Upshot eases with smoothstep, interpolates `s` geometrically,
+  `tx`/`ty`/`opacity` linearly and `rot` along the shortest arc; hold at
+  both ends. A layer that matches both its own track and its group's is
+  posed by its own track first, then by the group's (the group pose
+  applies to the already-posed layer); opacities multiply.
 - `transitions`: reserved, always `[]`. Writers should emit it; readers
   must not require it.
 
@@ -198,6 +230,7 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
 | `blend` | string | `normal`, `multiply`, `screen`, `overlay`, `add`. Unknown values read as `normal`. |
 | `locked`, `visible` | bool | Hidden layers are not rendered. |
 | `blur` | double | Optional, default 0. Gaussian sigma in world units, applied to the whole layer before opacity/blend. Upshot clamps to 0–20. |
+| `group` | string | Optional, default `""` (none). The layer's folder: a group is a contiguous run of layers sharing this name, and it continues across panels by name (a `kind: "group"` track in `sequence.json` animates every member). Readers that don't show folders may ignore it. |
 | `art` | string | Path relative to the panel directory. Always present, even for image layers. |
 | `image` | object | Optional. Makes this an **image layer**: its art SVG has no paths and the layer shows the referenced file instead. |
 | `image.file` | string | Archive entry path (`images/<name>`). PNG or JPEG. |
@@ -317,6 +350,8 @@ still complete. Writers should omit them at their default value.
 | `panel.json` | `dialogue` | `""` |
 | `layers.json` layer | `blur` | `0` |
 | `layers.json` layer | `image` | not an image layer |
+| `layers.json` layer | `group` | `""` |
+| `sequence.json` scene | `layer_tracks` | `[]` |
 | `clips.json` clip | `track` | `0` |
 | `clips.json` | `tracks` | one unmuted track |
 | `sequence.json` | `transitions` | `[]` |

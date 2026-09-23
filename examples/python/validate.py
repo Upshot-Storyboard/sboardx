@@ -38,6 +38,23 @@ def check(path):
     in_scenes = [pid for s in seq["scenes"] for pid in s["panels"]]
     if sorted(in_scenes) != sorted(seq["panels"]):
         raise ValueError("sequence.json: scenes do not partition panels")
+    for s in seq["scenes"]:
+        for track in s.get("layer_tracks", []):
+            if not isinstance(track.get("name"), str) or not track["name"]:
+                raise ValueError(f"scene {s['id']}: layer track without a name")
+            if track.get("kind") not in ("layer", "group"):
+                raise ValueError(f"scene {s['id']}: layer track {track['name']} has kind {track.get('kind')!r}")
+            pivot = track.get("pivot", {})
+            if not all(isinstance(pivot.get(k, 0.0), (int, float)) for k in ("x", "y")):
+                raise ValueError(f"scene {s['id']}: layer track {track['name']} pivot is not numeric")
+            times = [k["t"] for k in track["keyframes"]]
+            if times != sorted(times):
+                raise ValueError(f"scene {s['id']}: layer track {track['name']} keyframes not sorted by t")
+            for k in track["keyframes"]:
+                if not k.get("s", 1.0) > 0:
+                    raise ValueError(f"layer keyframe {k['id']}: s must be > 0")
+                if not 0 <= k.get("opacity", 1.0) <= 1:
+                    raise ValueError(f"layer keyframe {k['id']}: opacity must be 0..1")
 
     for pid in seq["panels"]:
         need(f"panels/{pid}/panel.json")
@@ -46,6 +63,8 @@ def check(path):
             need(f"panels/{pid}/{layer['art']}")
             if "image" in layer:
                 need(layer["image"]["file"])
+            if not isinstance(layer.get("group", ""), str):
+                raise ValueError(f"panel {pid}: layer {layer['id']} group is not a string")
 
     if "audio/clips.json" in names:
         clips = json.loads(z.read("audio/clips.json"))

@@ -524,12 +524,14 @@ function buildScenes() {
         start: t, dur: 0, count: 0,
         kfs: rawScene && rawScene.camera && Array.isArray(rawScene.camera.keyframes)
           ? rawScene.camera.keyframes.slice().sort((a, b) => a.t - b.t) : [],
+        layerTracks: buildLayerTracks(rawScene),
         synthetic: !rawScene,
       };
       S.scenes.push(built);
     }
     prevRaw = rawScene;
     first = false;
+    panel.sceneLocalStart = t - built.start;   // for static (thumbnail) poses
     built.dur += panel.meta.dur;
     built.count += 1;
     panel.scene = built;
@@ -581,6 +583,101 @@ function camPoseAt(kfs, t) {
   };
 }
 
+// ── Layer animation (mirror of the app's sb::anim) ──────────────────────────
+//
+// sequence.json's optional `layer_tracks`: per scene, keyframed poses applied
+// by NAME — kind "layer" to every layer named like the track, kind "group"
+// to every layer whose `group` is the track's name. Same easing/hold rules
+// as the camera; uniform scale interpolates geometrically. Tracks with an
+// unknown kind are skipped.
+function buildLayerTracks(rawScene) {
+  if (!rawScene || !Array.isArray(rawScene.layer_tracks)) return [];
+  const out = [];
+  for (const tr of rawScene.layer_tracks) {
+    if (!tr || typeof tr.name !== 'string' || !tr.name) continue;
+    if (tr.kind !== 'layer' && tr.kind !== 'group') continue;
+    const pivot = tr.pivot || {};
+    out.push({
+      name: tr.name,
+      isGroup: tr.kind === 'group',
+      px: Number(pivot.x) || 0,
+      py: Number(pivot.y) || 0,
+      kfs: (Array.isArray(tr.keyframes) ? tr.keyframes : [])
+        .filter(k => k && typeof k.t === 'number')
+        .slice().sort((a, b) => a.t - b.t),
+    });
+  }
+  return out;
+}
+
+function layerPoseAt(kfs, t) {
+  const pose = k => ({
+    tx: k.tx || 0, ty: k.ty || 0,
+    s: (typeof k.s === 'number' && k.s > 0) ? k.s : 1,
+    rot: k.rot || 0,
+    opacity: (typeof k.opacity === 'number') ? Math.max(0, Math.min(1, k.opacity)) : 1,
+  });
+  if (!kfs.length) return { tx: 0, ty: 0, s: 1, rot: 0, opacity: 1 };
+  if (t <= kfs[0].t) return pose(kfs[0]);
+  if (t >= kfs[kfs.length - 1].t) return pose(kfs[kfs.length - 1]);
+  let i = 0;
+  while (i + 2 < kfs.length && kfs[i + 1].t <= t) i++;
+  const a = pose(kfs[i]), b = pose(kfs[i + 1]);
+  const span = kfs[i + 1].t - kfs[i].t;
+  const raw = span > 1e-9 ? Math.max(0, Math.min(1, (t - kfs[i].t) / span)) : 1;
+  const f = raw * raw * (3 - 2 * raw);
+  return {
+    tx: a.tx + (b.tx - a.tx) * f,
+    ty: a.ty + (b.ty - a.ty) * f,
+    s: Math.exp(Math.log(a.s) + (Math.log(b.s) - Math.log(a.s)) * f),
+    rot: wrapDeg(a.rot + wrapDeg(b.rot - a.rot) * f),
+    opacity: a.opacity + (b.opacity - a.opacity) * f,
+  };
+}
+
+// The pose's world affine p' = c + T + S(s)·R(rot)·(p − c) as an SVG
+// matrix(a b c d e f) — the same scalar layout as image transforms.
+function layerPoseMatrix(pose, px, py) {
+  const r = pose.rot * Math.PI / 180;
+  const a = pose.s * Math.cos(r), b = pose.s * Math.sin(r);
+  const c = -b, d = a;
+  const e = px + pose.tx - (a * px + c * py);
+  const f = py + pose.ty - (b * px + d * py);
+  return `matrix(${a.toFixed(6)} ${b.toFixed(6)} ${c.toFixed(6)} ${d.toFixed(6)} ${e.toFixed(4)} ${f.toFixed(4)})`;
+}
+
+// Writes a layer wrapper's transform/opacity for scene-local time t: the
+// layer's own track first, then its group's (SVG applies the left matrix
+// last, so the group matrix goes first in the attribute).
+function poseLayerNode(el, layer, scene, t) {
+  let transform = '';
+  let opacity = 1;
+  const own = scene.layerTracks.find(tr => !tr.isGroup && tr.name === layer.name);
+  const grp = layer.group
+    ? scene.layerTracks.find(tr => tr.isGroup && tr.name === layer.group) : null;
+  if (grp) {
+    const p = layerPoseAt(grp.kfs, t);
+    transform += layerPoseMatrix(p, grp.px, grp.py);
+    opacity *= p.opacity;
+  }
+  if (own) {
+    const p = layerPoseAt(own.kfs, t);
+    transform += (transform ? ' ' : '') + layerPoseMatrix(p, own.px, own.py);
+    opacity *= p.opacity;
+  }
+  if (transform) el.setAttribute('transform', transform); else el.removeAttribute('transform');
+  if (opacity !== 1) el.setAttribute('opacity', opacity.toFixed(4)); else el.removeAttribute('opacity');
+}
+
+// Re-poses the live composite's layer wrappers at the playhead (the
+// per-tick sibling of applyCamera).
+function applyLayerPoses() {
+  const panel = S.animPanel;
+  if (!panel || !S.animNodes || !panel.scene) return;
+  const t = S.playhead - panel.scene.start;
+  for (const { el, layer } of S.animNodes) poseLayerNode(el, layer, panel.scene, t);
+}
+
 // Applies the current panel's scene camera (sampled at the playhead) to the
 // canvas content. Pose cx/cy are WORLD coordinates (frame center = origin):
 // the CSS chain equals the world affine
@@ -593,6 +690,7 @@ function applyCamera() {
   const panel = S.panels[S.currentIdx];
   const scene = panel && panel.scene;
   const pose = scene ? camPoseAt(scene.kfs, S.playhead - scene.start) : null;
+  applyLayerPoses();
   if (!pose) {
     el.style.transform = '';
     el.style.transformOrigin = '';
@@ -814,6 +912,17 @@ function compositeSVG(panel, mini = false) {
     return `url(#${id})`;
   };
 
+  // Every layer's node sits in its own <g> wrapper: the wrapper carries the
+  // layer's animation pose (transform + opacity from the scene's
+  // layer_tracks), so the art inside stays untouched.
+  const anim = [];
+  const attach = (node, layer) => {
+    const wrap = document.createElementNS(NS, 'g');
+    wrap.appendChild(node);
+    root.appendChild(wrap);
+    anim.push({ el: wrap, layer });
+  };
+
   const parser = new DOMParser();
   for (const layer of panel.layers) {        // already bottom-to-top
     if (!layer.visible) continue;
@@ -844,7 +953,7 @@ function compositeSVG(panel, mini = false) {
         style += `mix-blend-mode: ${layer.blend}; `;
       if (blurUrl) style += `filter: ${blurUrl}; `;
       if (style) img.setAttribute('style', style.trim());
-      root.appendChild(img);
+      attach(img, layer);
       continue;
     }
     const svgStr = panel.svgText.get(layer.id);
@@ -857,7 +966,7 @@ function compositeSVG(panel, mini = false) {
       // opacity and blend in the same style attribute stay as they are.
       if (blurUrl) node.style.filter = blurUrl;
       else if (node.style && node.style.filter) node.style.filter = '';
-      root.appendChild(node);
+      attach(node, layer);
     } else {
       // Fallback: some producers (e.g. Toon Boom's TB_ExportSboardx before
       // it grew the wrapper) emit drawables directly under <svg> with no
@@ -870,8 +979,17 @@ function compositeSVG(panel, mini = false) {
         if (child.tagName === 'rect' && child.getAttribute('fill') === 'none') continue;
         wrap.appendChild(document.importNode(child, true));
       }
-      root.appendChild(wrap);
+      attach(wrap, layer);
     }
+  }
+  if (mini) {
+    // Thumbnails are static: pose at the panel's first frame.
+    if (panel.scene) {
+      for (const { el, layer } of anim) poseLayerNode(el, layer, panel.scene, panel.sceneLocalStart || 0);
+    }
+  } else {
+    S.animPanel = panel;
+    S.animNodes = anim;
   }
   return root;
 }
