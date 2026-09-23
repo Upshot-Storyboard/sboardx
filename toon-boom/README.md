@@ -39,9 +39,14 @@ What you get:
 Click **TB_ExportSboardx** and choose where to save. Layers are read back as
 vectors; bitmap layers and textured fills are rendered to images at the
 project resolution and cropped to the frame. Panel notes and dialogue,
-audio tracks and camera moves come along. Gradients flatten to their base
-colour, blur is lost (already baked into pixels on import), audio gain isn't
-available from Storyboard Pro so clips export at the app's default.
+audio tracks and camera moves come along. Camera moves are read from the
+scene's live camera: pan, scale, rotation and a Z dolly (folded into the
+zoom). Keyframes kept as `sboardx-camera` panel metadata by the importer are
+only echoed back when they still match the live camera; if the camera was
+edited in Storyboard Pro the live move is exported and the Message Log says
+so. Gradients flatten to their base colour, blur is lost (already baked into
+pixels on import), audio gain isn't available from Storyboard Pro so clips
+export at the app's default.
 
 ## Batch
 

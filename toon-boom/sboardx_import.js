@@ -418,7 +418,8 @@ function applySceneCamera(env, shotId, kfs) {
         var kfAt = [];
         var i;
         for (i = 0; i < sorted.length; i++) {
-            var frame = Math.max(1, Math.round(sorted[i].t * env.fps));
+            // Storyboard Pro frames are 1-based: t = 0 is frame 1.
+            var frame = Math.max(1, Math.round(sorted[i].t * env.fps) + 1);
             if (frames.length > 0 && frames[frames.length - 1] === frame) {
                 kfAt[kfAt.length - 1] = sorted[i];
             } else {

@@ -411,95 +411,173 @@ function functionValueAt(env, shotId, col, frame, fallback) {
     }
 }
 
-function readSceneCamera(env, sceneId, firstPanelId) {
-    if (firstPanelId) {
-        try {
-            var meta = env.sb.getPanelMetadata(firstPanelId, "sboardx-camera");
-            var raw = (meta && meta.value !== undefined) ? meta.value : meta;
-            if (raw && String(raw).length > 0) {
-                var kfs = JSON.parse(String(raw));
-                if (kfs && kfs.length) {
-                    env.log.trace("scene " + sceneId +
-                                  ": camera from sboardx-camera metadata");
-                    return kfs;
-                }
-            }
-        } catch (e) {}
-    }
+function readCameraMeta(env, firstPanelId) {
+    if (!firstPanelId) return null;
     try {
-        var fm = env.fm, mm = env.mm;
-        var posCol = mm.linkedCameraFunction(sceneId, "position.attr3dpath");
-        var sxCol = mm.linkedCameraFunction(sceneId, "scale.x");
-        var rotCol = mm.linkedCameraFunction(sceneId, "rotation.anglez");
+        var meta = env.sb.getPanelMetadata(firstPanelId, "sboardx-camera");
+        var raw = (meta && meta.value !== undefined) ? meta.value : meta;
+        if (!raw || String(raw).length === 0) return null;
+        var kfs = JSON.parse(String(raw));
+        if (!kfs || !kfs.length) return null;
+        return kfs.slice().sort(function (a, b) { return a.t - b.t; });
+    } catch (e) {
+        return null;
+    }
+}
 
-        var frames = [];
-        var posAt = {};
-        var seen = {};
-        var i, f;
-        var sepX = "", sepY = "";
+// True when the keyframes stored as sboardx-camera metadata on import still
+// describe the live camera (same keys, within a frame in time and 1e-3 in
+// value). Then the metadata is exported verbatim for a lossless round trip;
+// otherwise the camera was edited in Storyboard Pro and the live one wins.
+function cameraKfsMatch(env, live, meta) {
+    if (!live || !meta || live.length !== meta.length) return false;
+    var tolT = 1.0 / env.fps + 1e-6;
+    var keys = ["z", "cx", "cy", "rot"];
+    for (var i = 0; i < live.length; i++) {
+        var a = live[i], b = meta[i];
+        if (Math.abs(a.t - (Number(b.t) || 0)) > tolT) return false;
+        for (var k = 0; k < keys.length; k++) {
+            var av = a[keys[k]], bv = Number(b[keys[k]]);
+            if (keys[k] === "z" && !(bv > 0)) bv = 1;
+            if (!isFinite(bv)) bv = 0;
+            if (Math.abs(av - bv) > 1e-3 * Math.max(1, Math.abs(av))) return false;
+        }
+    }
+    return true;
+}
+
+// Reads the scene's live camera (Camera-Peg pan, scale, rotation and Z
+// dolly) as sboardx keyframes. Frames are 1-based in Storyboard Pro, so
+// frame 1 is t = 0. A Z dolly is folded into the zoom: with the Camera node
+// D fields from the drawing plane (offset.z, 12 by default) and the peg at
+// pz, the frame scales by D / (D + pz).
+function readLiveCamera(env, sceneId) {
+    var fm = env.fm, mm = env.mm;
+    var posCol = mm.linkedCameraFunction(sceneId, "position.attr3dpath");
+    var sxCol = mm.linkedCameraFunction(sceneId, "scale.x");
+    var rotCol = mm.linkedCameraFunction(sceneId, "rotation.anglez");
+
+    var camDist = 12;
+    try {
+        var d = Number(mm.getTextAttr(sceneId, "Top/Camera", "offset.z", 1));
+        if (isFinite(d) && d > 0) camDist = d;
+    } catch (e0) {}
+
+    var frames = [];
+    var posAt = {};
+    var seen = {};
+    var i, f;
+    function addFrame(fr) {
+        if (!seen[fr]) { seen[fr] = true; frames.push(fr); }
+    }
+    function collect(col, into) {
+        var n = col ? fm.numberOfPoints(sceneId, col) : 0;
+        for (var j = 0; j < n; j++) {
+            var fr = fm.pointX(sceneId, col, j);
+            into[fr] = fm.pointY(sceneId, col, j);
+            addFrame(fr);
+        }
+    }
+    function staticZ(fr) {
         try {
-            if (mm.getTextAttr(sceneId, "Top/Camera-Peg", "position.separate", 1) == "On") {
-                sepX = mm.getLinkedFunction(sceneId, "Top/Camera-Peg", "position.x");
-                sepY = mm.getLinkedFunction(sceneId, "Top/Camera-Peg", "position.y");
-            }
-        } catch (e2) {}
-        if (sepX || sepY) {
-            var xAt = {}, yAt = {};
-            var nx = sepX ? fm.numberOfPoints(sceneId, sepX) : 0;
-            for (i = 0; i < nx; i++) {
-                f = fm.pointX(sceneId, sepX, i); xAt[f] = fm.pointY(sceneId, sepX, i);
-                if (!seen[f]) { seen[f] = true; frames.push(f); }
-            }
-            var ny = sepY ? fm.numberOfPoints(sceneId, sepY) : 0;
-            for (i = 0; i < ny; i++) {
-                f = fm.pointX(sceneId, sepY, i); yAt[f] = fm.pointY(sceneId, sepY, i);
-                if (!seen[f]) { seen[f] = true; frames.push(f); }
-            }
-            for (i = 0; i < frames.length; i++) {
-                f = frames[i];
-                posAt[f] = { x: xAt[f] !== undefined ? xAt[f] : functionValueAt(env, sceneId, sepX, f, 0),
-                             y: yAt[f] !== undefined ? yAt[f] : functionValueAt(env, sceneId, sepY, f, 0) };
-            }
-        } else {
-            var nb = fm.numberOfPointsPath3d(sceneId, posCol);
-            for (i = 0; i < nb; i++) {
-                f = fm.pointLockedAtFrame(sceneId, posCol, i);
-                posAt[f] = { x: fm.pointXPath3d(sceneId, posCol, i),
-                             y: fm.pointYPath3d(sceneId, posCol, i) };
-                if (!seen[f]) { seen[f] = true; frames.push(f); }
-            }
-        }
-        var extraCols = [sxCol, rotCol];
-        for (var c = 0; c < extraCols.length; c++) {
-            var n2 = fm.numberOfPoints(sceneId, extraCols[c]);
-            for (i = 0; i < n2; i++) {
-                f = fm.pointX(sceneId, extraCols[c], i);
-                if (!seen[f]) { seen[f] = true; frames.push(f); }
-            }
-        }
-        if (frames.length < 2) return [];
-        frames.sort(function (a, b) { return a - b; });
+            var v = Number(mm.getTextAttr(sceneId, "Top/Camera-Peg", "position.z", fr));
+            return isFinite(v) ? v : 0;
+        } catch (e1) { return 0; }
+    }
 
-        var out = [];
+    var sepX = "", sepY = "", sepZ = "", separate = false;
+    try {
+        if (mm.getTextAttr(sceneId, "Top/Camera-Peg", "position.separate", 1) == "On") {
+            separate = true;
+            sepX = mm.getLinkedFunction(sceneId, "Top/Camera-Peg", "position.x");
+            sepY = mm.getLinkedFunction(sceneId, "Top/Camera-Peg", "position.y");
+            sepZ = mm.getLinkedFunction(sceneId, "Top/Camera-Peg", "position.z");
+        }
+    } catch (e2) {}
+    if (separate && (sepX || sepY || sepZ)) {
+        var xAt = {}, yAt = {}, zAt = {};
+        collect(sepX, xAt);
+        collect(sepY, yAt);
+        collect(sepZ, zAt);
         for (i = 0; i < frames.length; i++) {
             f = frames[i];
-            var pos = posAt[f] ? posAt[f] : { x: 0, y: 0 };
-            var s = functionValueAt(env, sceneId, sxCol, f, 1);
-            var ang = functionValueAt(env, sceneId, rotCol, f, 0);
-            out.push({
-                id: "kf" + (i + 1),
-                t: f / env.fps,
-                z: 1.0 / (s || 1),
-                cx: pos.x / env.fields.perWorldX,
-                cy: -pos.y / env.fields.perWorldY,
-                rot: -ang
-            });
+            posAt[f] = {
+                x: xAt[f] !== undefined ? xAt[f] : functionValueAt(env, sceneId, sepX, f, 0),
+                y: yAt[f] !== undefined ? yAt[f] : functionValueAt(env, sceneId, sepY, f, 0),
+                z: zAt[f] !== undefined ? zAt[f]
+                   : (sepZ ? functionValueAt(env, sceneId, sepZ, f, 0) : staticZ(f))
+            };
         }
-        return out;
+    } else {
+        var nb = fm.numberOfPointsPath3d(sceneId, posCol);
+        for (i = 0; i < nb; i++) {
+            f = fm.pointLockedAtFrame(sceneId, posCol, i);
+            posAt[f] = { x: fm.pointXPath3d(sceneId, posCol, i),
+                         y: fm.pointYPath3d(sceneId, posCol, i),
+                         z: fm.pointZPath3d(sceneId, posCol, i) };
+            addFrame(f);
+        }
+    }
+    var extraCols = [sxCol, rotCol];
+    for (var c = 0; c < extraCols.length; c++) {
+        var n2 = fm.numberOfPoints(sceneId, extraCols[c]);
+        for (i = 0; i < n2; i++) addFrame(fm.pointX(sceneId, extraCols[c], i));
+    }
+    if (frames.length === 0) return [];
+    frames.sort(function (a, b) { return a - b; });
+
+    var out = [];
+    var warnedZ = false;
+    for (i = 0; i < frames.length; i++) {
+        f = frames[i];
+        var pos = posAt[f] ? posAt[f] : { x: 0, y: 0, z: 0 };
+        var s = functionValueAt(env, sceneId, sxCol, f, 1);
+        var ang = functionValueAt(env, sceneId, rotCol, f, 0);
+        var zoom = 1.0 / (s || 1);
+        var pz = Number(pos.z) || 0;
+        if (camDist + pz > 1e-6) {
+            zoom *= camDist / (camDist + pz);
+        } else if (!warnedZ) {
+            warnedZ = true;
+            env.log.warn("camera on scene " + sceneId + " sits on or behind the " +
+                         "drawing plane at frame " + f + "; Z dolly ignored");
+        }
+        out.push({
+            id: "kf" + (i + 1),
+            t: (f - 1) / env.fps,
+            z: zoom,
+            cx: pos.x / env.fields.perWorldX,
+            cy: -pos.y / env.fields.perWorldY,
+            rot: -ang
+        });
+    }
+    return out;
+}
+
+function readSceneCamera(env, sceneId, firstPanelId) {
+    var live = null;
+    try {
+        live = readLiveCamera(env, sceneId);
     } catch (e3) {
         env.log.warn("camera could not be read on scene " + sceneId + ": " + e3);
-        return [];
     }
+    var meta = readCameraMeta(env, firstPanelId);
+    if (meta) {
+        if (!live || live.length === 0) {
+            env.log.trace("scene " + sceneId + ": camera from sboardx-camera " +
+                          "metadata (no live camera keys)");
+            return meta;
+        }
+        if (cameraKfsMatch(env, live, meta)) {
+            env.log.trace("scene " + sceneId + ": camera from sboardx-camera " +
+                          "metadata (matches the live camera)");
+            return meta;
+        }
+        env.log.warn("sboardx-camera metadata on panel " + firstPanelId +
+                     " is stale (camera edited in Storyboard Pro); exporting " +
+                     "the live camera on scene " + sceneId);
+    }
+    return live || [];
 }
 
 function rasterTransform(env, w, h) {
