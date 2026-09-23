@@ -81,7 +81,8 @@ function makeImportEnv(common, log, options) {
         scratchPalette: null,
         counts: { scenes: 0, panels: 0, layers: 0, imageLayers: 0,
                   blurredLayers: 0, failedLayers: 0, camScenes: 0,
-                  camApplied: 0 }
+                  camApplied: 0, groups: 0, animatedLayers: 0,
+                  opacityTracks: 0 }
     };
 }
 
@@ -155,7 +156,10 @@ function groupScenes(sequenceJson) {
                 name: raw[si] && raw[si].name ? raw[si].name : ("Scene " + (groups.length + 1)),
                 panels: [],
                 keyframes: raw[si] && raw[si].camera && raw[si].camera.keyframes
-                    ? raw[si].camera.keyframes : []
+                    ? raw[si].camera.keyframes : [],
+                // Layer animation tracks (SPEC.md "layer_tracks"), applied
+                // once the scene's panels exist.
+                layerTracks: raw[si] && raw[si].layer_tracks ? raw[si].layer_tracks : []
             });
         }
         groups[groups.length - 1].panels.push(panelIds[i]);
@@ -196,6 +200,9 @@ function importScenes(env) {
         env.counts.scenes++;
 
         var firstPanelId = importScenePanels(env, sceneId, group);
+        if (group.layerTracks.length > 0 && firstPanelId) {
+            applyLayerTracks(env, sceneId, group);
+        }
         if (group.keyframes.length > 0 && firstPanelId) {
             if (applySceneCamera(env, sceneId, group.keyframes)) {
                 env.counts.camApplied++;
@@ -215,11 +222,13 @@ function importScenes(env) {
 function importScenePanels(env, sceneId, group) {
     var firstPanelId = "";
     var prevPanelId = "";
+    group.sbpPanelIds = [];   // per source panel, "" when it failed
     for (var p = 0; p < group.panels.length; p++) {
         var srcId = group.panels[p];
         var meta = env.common.readJsonFile(env.extractDir + "/panels/" + srcId + "/panel.json");
         if (!meta) {
             env.log.warn("panel.json missing for " + srcId);
+            group.sbpPanelIds.push("");
             continue;
         }
 
@@ -231,8 +240,10 @@ function importScenePanels(env, sceneId, group) {
         }
         if (!panelId || String(panelId).length === 0) {
             env.log.warn("could not create panel for " + srcId);
+            group.sbpPanelIds.push("");
             continue;
         }
+        group.sbpPanelIds.push(String(panelId));
         prevPanelId = panelId;
         if (p === 0) firstPanelId = panelId;
         if (!env.firstImportedPanel) env.firstImportedPanel = panelId;
@@ -341,6 +352,19 @@ function importSummary(env) {
     if (c.failedLayers > 0) {
         summary += "\n\n" + c.failedLayers + " layer(s) could not be imported " +
                    "(see the Message Log).";
+    }
+    if (c.groups > 0) {
+        summary += "\n\n" + c.groups + " layer group(s) created.";
+    }
+    if (c.animatedLayers > 0) {
+        summary += "\n\nLayer animation applied to " + c.animatedLayers +
+                   " layer(s) (keys per panel; the app's easing is approximated " +
+                   "by Storyboard Pro's interpolation between the same keyframes).";
+    }
+    if (c.opacityTracks > 0) {
+        summary += "\n\n" + c.opacityTracks + " animated layer(s) had opacity " +
+                   "keyframes; Storyboard Pro cannot animate opacity from a " +
+                   "script, so they keep a constant opacity.";
     }
     if (env.log.warnings.length > 0) {
         summary += "\n\nWarnings:\n- " + env.log.warnings.join("\n- ");
@@ -522,6 +546,7 @@ function importPanelLayers(env, panelId, srcId) {
     }
 
     configureImportedLayers(env, panelId, okIndexAligned);
+    applyLayerGroups(env, panelId, okIndexAligned);
 
     if (okIndexAligned.length > 0 && preexisting > 0) {
         for (var d = env.lm.numberOfLayers(panelId) - 1; d >= okIndexAligned.length; d--) {
@@ -592,6 +617,193 @@ function configureImportedLayers(env, panelId, entries) {
             env.log.warn("layer '" + src.name + "': lock not applied (" + e3 + ")");
         }
     }
+}
+
+// Layer groups (layers.json "group": a folder = a contiguous run of layers
+// sharing the name). Storyboard Pro group layers are real entries in the
+// flat layer index (probed: a group sits directly above its children, which
+// report groupOfLayer == the group's index), so every structural call
+// shifts indices — members are re-resolved by name after each one.
+
+function applyLayerGroups(env, panelId, entries) {
+    // `entries` are top-to-bottom, index-aligned with the panel's stack.
+    var i = 0;
+    while (i < entries.length) {
+        var g = entries[i].group ? String(entries[i].group) : "";
+        if (!g) { i++; continue; }
+        var run = [];
+        while (i < entries.length && String(entries[i].group || "") === g) {
+            run.push(String(entries[i].name));
+            i++;
+        }
+        try {
+            var firstIdx = env.lm.layerIndexFromName(panelId, env.common.sbpNodeName(run[0]));
+            if (firstIdx < 0) { env.log.warn("group '" + g + "': member '" + run[0] + "' not found"); continue; }
+            if (!env.lm.addGroupLayer(panelId, firstIdx, true, g)) {
+                env.log.warn("group '" + g + "' could not be created");
+                continue;
+            }
+            var groupIdx = env.lm.layerIndexFromName(panelId, env.common.sbpNodeName(g));
+            if (groupIdx < 0) { env.log.warn("group '" + g + "' not found after creation"); continue; }
+            for (var m = 0; m < run.length; m++) {
+                var li = env.lm.layerIndexFromName(panelId, env.common.sbpNodeName(run[m]));
+                if (li < 0) { env.log.warn("group '" + g + "': member '" + run[m] + "' not found"); continue; }
+                // moveLayerInGroup appends at the END of the group: members
+                // are visited top-to-bottom, so the stack order survives.
+                env.lm.moveLayerInGroup(panelId, li, groupIdx);
+                groupIdx = env.lm.layerIndexFromName(panelId, env.common.sbpNodeName(g));
+            }
+            env.counts.groups++;
+        } catch (e) {
+            env.log.warn("group '" + g + "' not applied: " + e);
+        }
+    }
+}
+
+// Layer animation (sequence.json "layer_tracks"): per scene, keyed by layer
+// or group NAME, scene-local seconds, continuing across panel cuts. SBP
+// keys live per (panel, layer) on real panel frames, so each track is split
+// at every panel cut with SAMPLED boundary keys (the motion stays
+// continuous), and applied to every panel that has a layer of that name.
+
+function applyLayerTracks(env, sceneId, group) {
+    var frameH = (env.projectJson.canvas && env.projectJson.canvas.height)
+        ? env.projectJson.canvas.height : 540;
+    var fields = env.common.cameraFields(frameH);
+    var mm = new MotionManager();
+    var fm = new FunctionManager();
+
+    // Panel spans in scene-local seconds (from the durations SBP holds).
+    var spans = [];
+    var acc = 0;
+    for (var p = 0; p < group.sbpPanelIds.length; p++) {
+        var pid = group.sbpPanelIds[p];
+        var frames = pid ? env.sb.getPanelDuration(pid) : 0;
+        spans.push({ panelId: pid, frames: frames, start: acc, end: acc + frames / env.fps });
+        acc += frames / env.fps;
+    }
+
+    for (var t = 0; t < group.layerTracks.length; t++) {
+        var track = group.layerTracks[t];
+        if (!track || typeof track.name !== "string" || !track.name) continue;
+        var isGroup = track.kind === "group";
+        if (!isGroup && track.kind !== "layer") continue;
+        var kfs = (track.keyframes || []).slice().sort(function (a, b) { return a.t - b.t; });
+        if (kfs.length === 0) continue;
+        var px = track.pivot && typeof track.pivot.x === "number" ? track.pivot.x : 0;
+        var py = track.pivot && typeof track.pivot.y === "number" ? track.pivot.y : 0;
+        var nodeName = env.common.sbpNodeName(track.name);
+        var applied = 0;
+        var opacityAnimated = false;
+        for (var k = 1; k < kfs.length; k++) {
+            if (Math.abs((kfs[k].opacity === undefined ? 1 : kfs[k].opacity) -
+                         (kfs[0].opacity === undefined ? 1 : kfs[0].opacity)) > 1e-6) {
+                opacityAnimated = true;
+            }
+        }
+
+        for (p = 0; p < spans.length; p++) {
+            var span = spans[p];
+            if (!span.panelId || span.frames <= 0) continue;
+            var li = -1;
+            try { li = env.lm.layerIndexFromName(span.panelId, nodeName); } catch (e0) {}
+            if (li < 0) continue;
+            try {
+                var wantGroup = env.lm.isGroupLayer(span.panelId, li) === true;
+                if (wantGroup !== isGroup) continue;
+            } catch (e1) {}
+            try {
+                if (applyTrackToLayer(env, mm, fm, fields, span, li, kfs, px, py)) {
+                    applied++;
+                    if (opacityAnimated) env.counts.opacityTracks++;
+                }
+            } catch (e2) {
+                env.log.warn("animation of '" + track.name + "' not applied on panel " +
+                             span.panelId + ": " + e2);
+            }
+        }
+        if (applied === 0) {
+            env.log.warn("animation track '" + track.name + "' matched no " +
+                         (isGroup ? "group" : "layer") + " in scene " + sceneId);
+        } else {
+            env.counts.animatedLayers += applied;
+        }
+    }
+}
+
+function applyTrackToLayer(env, mm, fm, fields, span, li, kfs, px, py) {
+    var panelId = span.panelId;
+    // Frames to key: every keyframe strictly inside the panel, plus the
+    // panel's first and last frame (sampled) so the pose is continuous
+    // across the cut. Coincident frames collapse onto one key.
+    var keyTimes = [span.start, span.end];
+    for (var k = 0; k < kfs.length; k++) {
+        if (kfs[k].t > span.start + 1e-9 && kfs[k].t < span.end - 1e-9) keyTimes.push(kfs[k].t);
+    }
+    keyTimes.sort(function (a, b) { return a - b; });
+    var frames = [], poses = [];
+    for (k = 0; k < keyTimes.length; k++) {
+        var f = env.common.panelTimeToFrame(keyTimes[k] - span.start, span.frames, env.fps);
+        if (frames.length && frames[frames.length - 1] === f) continue;
+        frames.push(f);
+        poses.push(env.common.layerPoseAt(kfs, keyTimes[k]));
+    }
+    // A pose that is identity throughout leaves the layer alone.
+    var allIdentity = true;
+    for (k = 0; k < poses.length; k++) {
+        if (!env.common.isIdentityPose(poses[k])) { allIdentity = false; break; }
+    }
+    if (allIdentity && frames.length <= 2) return false;
+
+    // The camera's probed order: enable, add every key, THEN fetch the
+    // function handles (before that they are "" and writes are no-ops).
+    try { mm.setLayerAnimated(panelId, li, true); } catch (e0) {}
+    try { mm.clearLayerMotion(panelId, li); } catch (e1) {}
+    for (k = 0; k < frames.length; k++) mm.addLayerKeyFrame(panelId, li, frames[k]);
+
+    var posCol = String(mm.linkedLayerFunction(panelId, li, "offset.attr3dpath") || "");
+    var sxCol = String(mm.linkedLayerFunction(panelId, li, "scale.x") || "");
+    var syCol = String(mm.linkedLayerFunction(panelId, li, "scale.y") || "");
+    var rotCol = String(mm.linkedLayerFunction(panelId, li, "rotation.anglez") || "");
+    if (!posCol || !sxCol || !rotCol) {
+        throw "no animation functions on layer " + li;
+    }
+
+    var scaleVals = [], rotVals = [];
+    var nb = fm.numberOfPointsPath3d(panelId, posCol);
+    var locked = [];
+    for (k = 0; k < nb; k++) locked.push(fm.pointLockedAtFrame(panelId, posCol, k));
+    for (k = 0; k < frames.length; k++) {
+        var sbp = env.common.poseToSbp(poses[k], px, py, fields);
+        scaleVals.push(sbp.scale);
+        rotVals.push(sbp.angle);
+        var pt = -1;
+        for (var q = 0; q < nb; q++) {
+            if (locked[q] === frames[k]) { pt = q; break; }
+        }
+        if (pt < 0 && nb === frames.length) pt = k;
+        if (pt >= 0) {
+            fm.setPointPath3d(panelId, posCol, pt, sbp.x, sbp.y,
+                              fm.pointZPath3d(panelId, posCol, pt), 0, 0, 0);
+        } else {
+            env.log.warn("no offset path point for frame " + frames[k] +
+                         " on panel " + panelId + " layer " + li + "; move key skipped");
+        }
+    }
+    setEasedKeys(env, panelId, sxCol, frames, scaleVals);
+    if (syCol) setEasedKeys(env, panelId, syCol, frames, scaleVals);
+    setEasedKeys(env, panelId, rotCol, frames, rotVals);
+
+    // Opacity: no function column in SBP (probed) — the whole layer takes
+    // the track's opacity at the panel's first frame, times the layer's own.
+    var o0 = poses[0].opacity;
+    if (Math.abs(o0 - 1) > 1e-6) {
+        try {
+            var own = env.lm.layerOpacity(panelId, li);
+            env.lm.setLayerOpacity(panelId, li, Math.round(own * o0));
+        } catch (e2) {}
+    }
+    return true;
 }
 
 // Vector art

@@ -114,7 +114,8 @@ function makeExportEnv(common, log, zipPath) {
         panelIds: [],
         scenes: [],
         counts: { scenes: 0, panels: 0, layers: 0, rasterLayers: 0,
-                  emptyLayers: 0, camScenes: 0, audioClips: 0, audioTracks: 0 }
+                  emptyLayers: 0, camScenes: 0, audioClips: 0, audioTracks: 0,
+                  groups: 0, animatedLayers: 0, nestedGroups: 0 }
     };
 }
 
@@ -128,6 +129,7 @@ function walkProject(env) {
             numPanels > 0 ? String(env.sb.panelInScene(sceneId, 0)) : "");
 
         var scenePanels = [];
+        var sceneLayerInfo = [];   // per panel: the exported layer entries + SBP indices
         for (var pi = 0; pi < numPanels; pi++) {
             var panelId = String(env.sb.panelInScene(sceneId, pi));
             if (env.progress.cancelled()) throw { sboardxCancelled: true };
@@ -135,16 +137,20 @@ function walkProject(env) {
                               " (scene " + sceneName + ")");
             env.panelIds.push(panelId);
             scenePanels.push(panelId);
-            exportPanel(env, sceneId, sceneName, panelId, camKfs);
+            sceneLayerInfo.push(exportPanel(env, sceneId, sceneName, panelId, camKfs));
         }
 
         if (camKfs.length > 0) env.counts.camScenes++;
-        env.scenes.push({
+        var sceneObj = {
             id: String(sceneId),
             name: sceneName,
             panels: scenePanels,
             camera: { keyframes: camKfs }
-        });
+        };
+        env.progress.busy("Reading layer animation (scene " + sceneName + ")…");
+        var tracks = readLayerTracks(env, scenePanels, sceneLayerInfo);
+        if (tracks.length > 0) sceneObj.layer_tracks = tracks;
+        env.scenes.push(sceneObj);
         env.counts.scenes++;
     }
 }
@@ -160,11 +166,39 @@ function exportPanel(env, sceneId, sceneName, panelId, camKfs) {
 
     var layers = [];
     var rasterJobs = [];
+    var layerIndices = [];   // SBP index per emitted entry (bottom-to-top)
+    var groupNames = {};     // SBP index of a group layer -> its name
     var numLayers = env.lm.numberOfLayers(panelId);
-    for (var li = numLayers - 1; li >= 0; li--) {
+    var li;
+    for (li = 0; li < numLayers; li++) {
+        var isG = false;
+        try { isG = env.lm.isGroupLayer(panelId, li) === true; } catch (eg) {}
+        if (isG) {
+            groupNames[li] = String(env.lm.layerName(panelId, li));
+            var parent = -1;
+            try { parent = env.lm.groupOfLayer(panelId, li); } catch (ep) {}
+            if (parent >= 0) env.counts.nestedGroups++;
+        }
+    }
+    // SBP index 0 is the top layer; sboardx lists bottom-to-top. Group
+    // layers are folders, not art: they are skipped and their members
+    // carry the group's NAME (a nested group flattens to the innermost).
+    for (li = numLayers - 1; li >= 0; li--) {
+        if (groupNames.hasOwnProperty(li)) continue;
         var entry = exportLayer(env, panelDir, panelId, li, rasterJobs);
+        var owner = -1;
+        try { owner = env.lm.groupOfLayer(panelId, li); } catch (eo) {}
+        if (owner >= 0 && groupNames.hasOwnProperty(owner)) entry.group = groupNames[owner];
         layers.push(entry);
+        layerIndices.push(li);
         env.counts.layers++;
+    }
+    var seenGroups = {};
+    for (var gk in groupNames) {
+        if (groupNames.hasOwnProperty(gk) && !seenGroups[groupNames[gk]]) {
+            seenGroups[groupNames[gk]] = true;
+            env.counts.groups++;
+        }
     }
     if (rasterJobs.length > 0) {
         rasterizePanel(env, sceneId, panelId, rasterJobs, camKfs);
@@ -172,6 +206,143 @@ function exportPanel(env, sceneId, sceneName, panelId, camKfs) {
     env.common.writeTextFile(panelDir + "/layers.json",
                              JSON.stringify({ layers: layers }));
     env.counts.panels++;
+    return { panelId: panelId, entries: layers, indices: layerIndices, groups: groupNames };
+}
+
+// Layer animation -> sequence.json "layer_tracks". Per scene, one track per
+// distinct animated layer NAME (kind "layer") or group name (kind "group"):
+// every panel's keys for that name, converted from the panel's 1-based
+// frames to scene-local seconds and from SBP's field units and
+// counter-clockwise angle to the sboardx pose (pivot at the origin —
+// probed: SBP layer pivots read 0,0). A layer merely moved with the Layer
+// Transform tool (one key, or a static offset) exports as a one-keyframe
+// track: a static pose by spec. Opacity is exported as the layer's
+// constant value (SBP has no scriptable opacity animation).
+
+function readLayerTracks(env, panelIds, infos) {
+    var byKey = {};     // "layer:<name>" / "group:<name>" -> {name, kind, kfs}
+    var order = [];
+    var start = 0;      // scene-local start of the panel, seconds
+    for (var p = 0; p < infos.length; p++) {
+        var info = infos[p];
+        var panelId = info.panelId;
+        var panelFrames = env.sb.getPanelDuration(panelId);
+        var i, li, name, kind;
+        // Art layers (by name) and group layers (by name).
+        var targets = [];
+        for (i = 0; i < info.indices.length; i++) {
+            targets.push({ li: info.indices[i], name: String(info.entries[i].name), kind: "layer" });
+        }
+        for (var gk in info.groups) {
+            if (info.groups.hasOwnProperty(gk)) {
+                targets.push({ li: Number(gk), name: info.groups[gk], kind: "group" });
+            }
+        }
+        for (i = 0; i < targets.length; i++) {
+            li = targets[i].li; name = targets[i].name; kind = targets[i].kind;
+            var keys = readLayerKeys(env, panelId, li, panelFrames);
+            if (keys.length === 0) continue;
+            var key = kind + ":" + name;
+            if (!byKey[key]) {
+                byKey[key] = { name: name, kind: kind, kfs: [] };
+                order.push(key);
+            }
+            var track = byKey[key];
+            for (var k = 0; k < keys.length; k++) {
+                var t = start + keys[k].t;
+                // A key on the cut coincides with the previous panel's last
+                // key: keep one.
+                var last = track.kfs.length ? track.kfs[track.kfs.length - 1] : null;
+                if (last && Math.abs(last.t - t) < 0.5 / env.fps) continue;
+                track.kfs.push({ id: "lk" + (track.kfs.length + 1), t: t,
+                                 tx: keys[k].tx, ty: keys[k].ty, s: keys[k].s,
+                                 rot: keys[k].rot, opacity: keys[k].opacity });
+            }
+        }
+        start += panelFrames / env.fps;
+    }
+    var out = [];
+    for (var o = 0; o < order.length; o++) {
+        var tr = byKey[order[o]];
+        var allIdentity = true;
+        for (var q = 0; q < tr.kfs.length; q++) {
+            if (!env.common.isIdentityPose(tr.kfs[q])) { allIdentity = false; break; }
+        }
+        if (allIdentity) continue;
+        env.counts.animatedLayers++;
+        out.push({ name: tr.name, kind: tr.kind, pivot: { x: 0, y: 0 }, keyframes: tr.kfs });
+    }
+    return out;
+}
+
+// One panel's keys for one layer: the union of the frames its offset path,
+// scale and rotation functions key, each sampled to a full pose (seconds
+// within the panel). Empty when the layer is not animated.
+function readLayerKeys(env, panelId, li, panelFrames) {
+    var fm = env.fm, mm = env.mm;
+    var posCol = "", sxCol = "", rotCol = "";
+    try {
+        posCol = String(mm.linkedLayerFunction(panelId, li, "offset.attr3dpath") || "");
+        sxCol = String(mm.linkedLayerFunction(panelId, li, "scale.x") || "");
+        rotCol = String(mm.linkedLayerFunction(panelId, li, "rotation.anglez") || "");
+    } catch (e0) { return []; }
+    if (!posCol && !sxCol && !rotCol) return [];
+
+    var frames = [], seen = {}, posAt = {};
+    function addFrame(fr) { if (!seen[fr]) { seen[fr] = true; frames.push(fr); } }
+    var i, f;
+    try {
+        var nb = posCol ? fm.numberOfPointsPath3d(panelId, posCol) : 0;
+        for (i = 0; i < nb; i++) {
+            f = fm.pointLockedAtFrame(panelId, posCol, i);
+            posAt[f] = { x: fm.pointXPath3d(panelId, posCol, i),
+                         y: fm.pointYPath3d(panelId, posCol, i) };
+            addFrame(f);
+        }
+        var cols = [sxCol, rotCol];
+        for (var c = 0; c < cols.length; c++) {
+            if (!cols[c]) continue;
+            var n2 = fm.numberOfPoints(panelId, cols[c]);
+            for (i = 0; i < n2; i++) addFrame(fm.pointX(panelId, cols[c], i));
+        }
+    } catch (e1) { return []; }
+    if (frames.length === 0) return [];
+    frames.sort(function (a, b) { return a - b; });
+
+    var opacity = 1;
+    try { opacity = env.lm.layerOpacity(panelId, li) / 100; } catch (e2) {}
+
+    var out = [];
+    for (i = 0; i < frames.length; i++) {
+        f = frames[i];
+        if (f > panelFrames) continue;
+        var pos = posAt[f] ? posAt[f] : nearestPathPoint(env, panelId, posCol, f);
+        var s = sxCol ? functionValueAt(env, panelId, sxCol, f, 1) : 1;
+        var ang = rotCol ? functionValueAt(env, panelId, rotCol, f, 0) : 0;
+        var pose = env.common.sbpToPose(pos.x, pos.y, s, ang, env.fields);
+        pose.opacity = 1;   // the layer's static opacity is in layers.json
+        pose.t = env.common.panelFrameToTime(f, env.fps);
+        out.push(pose);
+    }
+    return out;
+}
+
+function nearestPathPoint(env, panelId, col, frame) {
+    var best = { x: 0, y: 0 };
+    if (!col) return best;
+    try {
+        var nb = env.fm.numberOfPointsPath3d(panelId, col);
+        var bestDist = -1;
+        for (var i = 0; i < nb; i++) {
+            var d = Math.abs(env.fm.pointLockedAtFrame(panelId, col, i) - frame);
+            if (bestDist < 0 || d < bestDist) {
+                bestDist = d;
+                best = { x: env.fm.pointXPath3d(panelId, col, i),
+                         y: env.fm.pointYPath3d(panelId, col, i) };
+            }
+        }
+    } catch (e) {}
+    return best;
 }
 
 function writePanelJson(env, panelDir, sceneName, panelId) {
@@ -832,6 +1003,16 @@ function exportSummary(env) {
     }
     if (c.emptyLayers > 0) {
         summary += "\n\n" + c.emptyLayers + " empty layer(s) exported empty.";
+    }
+    if (c.groups > 0) {
+        summary += "\n\n" + c.groups + " layer group(s) exported" +
+                   (c.nestedGroups > 0
+                        ? " (nested groups are flattened to their innermost group)." : ".");
+    }
+    if (c.animatedLayers > 0) {
+        summary += "\n\nLayer animation exported for " + c.animatedLayers +
+                   " layer/group track(s). Opacity keyframes are not readable " +
+                   "from Storyboard Pro; layers export with their constant opacity.";
     }
     summary += "\n\nGradients are approximated by their solid base color.";
     if (env.log.warnings.length > 0) {

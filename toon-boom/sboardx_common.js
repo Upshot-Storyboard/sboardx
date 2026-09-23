@@ -397,6 +397,96 @@ function cameraFields(frameH) {
     return { perWorldX: perWorldX, perWorldY: perWorldY };
 }
 
+// --- Layer animation (sboardx layer_tracks <-> Storyboard Pro layer keys) ---
+//
+// Probed on SBP 27 (2026-09-23): a layer's animation functions run on REAL
+// 1-based panel frames (frame 1 = the panel's start), exactly like the
+// camera's — addLayerKeyFrame clamps offset 0 to frame 1 and offsets past
+// the panel to its last frame. (The reference's "panels functions are 20
+// frames long" note is stale.) The layer node is "Top/<name>"; its offset
+// is a 3-D path in the camera peg's field units (cameraFields), scale and
+// rotation are bezier columns. Opacity has no function column: setLayerOpacity
+// with a frame sets the whole layer, so opacity keys cannot round-trip.
+
+// Storyboard Pro sanitises layer names to node names: every character
+// outside [A-Za-z0-9_-] becomes "_". Tracks are keyed by name, so both
+// directions match through this.
+function sbpNodeName(name) {
+    return String(name).replace(/[^A-Za-z0-9_\-]/g, "_");
+}
+
+// Seconds within a panel <-> the panel's 1-based frame (clamped to its span).
+function panelTimeToFrame(tInPanel, panelFrames, fps) {
+    var f = Math.round(tInPanel * fps) + 1;
+    if (f < 1) f = 1;
+    if (f > panelFrames) f = panelFrames;
+    return f;
+}
+function panelFrameToTime(frame, fps) {
+    return (frame - 1) / fps;
+}
+
+function wrapDeg(d) {
+    var x = ((d + 180) % 360 + 360) % 360;
+    return x - 180;
+}
+
+// The sboardx pose interpolation (SPEC.md "layer_tracks"): hold at both
+// ends, smoothstep, geometric scale, linear tx/ty/opacity, shortest-arc
+// rotation. `kfs` sorted by t; scene-local seconds.
+function layerPoseAt(kfs, t) {
+    function pose(k) {
+        return {
+            tx: Number(k.tx) || 0, ty: Number(k.ty) || 0,
+            s: (typeof k.s === "number" && k.s > 0) ? k.s : 1,
+            rot: Number(k.rot) || 0,
+            opacity: (typeof k.opacity === "number")
+                ? Math.max(0, Math.min(1, k.opacity)) : 1
+        };
+    }
+    if (!kfs || !kfs.length) return { tx: 0, ty: 0, s: 1, rot: 0, opacity: 1 };
+    if (t <= kfs[0].t) return pose(kfs[0]);
+    if (t >= kfs[kfs.length - 1].t) return pose(kfs[kfs.length - 1]);
+    var i = 0;
+    while (i + 2 < kfs.length && kfs[i + 1].t <= t) i++;
+    var a = pose(kfs[i]), b = pose(kfs[i + 1]);
+    var span = kfs[i + 1].t - kfs[i].t;
+    var raw = span > 1e-9 ? Math.max(0, Math.min(1, (t - kfs[i].t) / span)) : 1;
+    var f = raw * raw * (3 - 2 * raw);
+    return {
+        tx: a.tx + (b.tx - a.tx) * f,
+        ty: a.ty + (b.ty - a.ty) * f,
+        s: Math.exp(Math.log(a.s) + (Math.log(b.s) - Math.log(a.s)) * f),
+        rot: wrapDeg(a.rot + wrapDeg(b.rot - a.rot) * f),
+        opacity: a.opacity + (b.opacity - a.opacity) * f
+    };
+}
+
+// sboardx pose about a pivot -> SBP layer offset/scale/rotation with the
+// pivot folded in (p' = c + T + S·R(p − c) == a pivot-at-origin pose with
+// T' = c + T − S·R·c, the reader's layerPoseMatrix identity). World y is
+// down and SBP's is up; a positive sboardx rotation is clockwise on screen,
+// SBP's counter-clockwise — the camera's sign conventions.
+function poseToSbp(pose, px, py, fields) {
+    var r = pose.rot * Math.PI / 180;
+    var a = pose.s * Math.cos(r), b = pose.s * Math.sin(r);
+    var c = -b, d = a;
+    var tx = px + pose.tx - (a * px + c * py);
+    var ty = py + pose.ty - (b * px + d * py);
+    return { x: tx * fields.perWorldX, y: -ty * fields.perWorldY,
+             scale: pose.s, angle: -pose.rot };
+}
+function sbpToPose(x, y, scale, angle, fields) {
+    return { tx: x / fields.perWorldX, ty: -y / fields.perWorldY,
+             s: scale > 0 ? scale : 1, rot: wrapDeg(-angle), opacity: 1 };
+}
+
+function isIdentityPose(p) {
+    return Math.abs(p.tx) < 1e-6 && Math.abs(p.ty) < 1e-6 &&
+           Math.abs(p.s - 1) < 1e-6 && Math.abs(wrapDeg(p.rot)) < 1e-6 &&
+           Math.abs(p.opacity - 1) < 1e-6;
+}
+
 exports.makeLog = makeLog;
 exports.makeProgress = makeProgress;
 exports.readTextFile = readTextFile;
@@ -415,3 +505,11 @@ exports.imageSize = imageSize;
 exports.findPanelCaption = findPanelCaption;
 exports.ensurePanelCaption = ensurePanelCaption;
 exports.cameraFields = cameraFields;
+exports.sbpNodeName = sbpNodeName;
+exports.panelTimeToFrame = panelTimeToFrame;
+exports.panelFrameToTime = panelFrameToTime;
+exports.wrapDeg = wrapDeg;
+exports.layerPoseAt = layerPoseAt;
+exports.poseToSbp = poseToSbp;
+exports.sbpToPose = sbpToPose;
+exports.isIdentityPose = isIdentityPose;

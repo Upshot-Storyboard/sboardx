@@ -5,6 +5,9 @@ Format versions, not repo releases. The version is the `sboardx` string in
 
 ## Unreleased
 
+- Toon Boom bridge: `TB_ImportSboardx` recreates layer groups and applies
+  `layer_tracks` as per-panel layer keyframes; `TB_ExportSboardx` writes
+  group membership and reads layer keyframes back into `layer_tracks`.
 - `sequence.json`: scenes may carry `layer_tracks` — keyframed layer
   animation (move, uniform scale, rotate, opacity about a pivot) applied by
   layer NAME or group name across the scene's panels. Additive; readers

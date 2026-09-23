@@ -29,6 +29,11 @@ What you get:
 - Each layer as a vector drawing layer, in order, with name, opacity,
   visibility and lock. Image layers become bitmap layers. Blurred layers are
   imported as pre-blurred bitmaps, since Storyboard Pro has no layer blur.
+- Layer groups as Storyboard Pro group layers, members inside.
+- Layer and group animation as layer keyframes: a track is split at every
+  panel cut (Storyboard Pro keys live per panel) with boundary keys so the
+  motion stays continuous. Opacity keyframes cannot be scripted in
+  Storyboard Pro, so an animated layer keeps a constant opacity.
 - Notes and dialogue into the `Notes` and `Dialogue` captions.
 - Audio clips onto sound tracks, one per sboardx track, trimmed and placed.
   This replaces any clips already on the sound tracks.
@@ -44,9 +49,15 @@ scene's live camera: pan, scale, rotation and a Z dolly (folded into the
 zoom). Keyframes kept as `sboardx-camera` panel metadata by the importer are
 only echoed back when they still match the live camera; if the camera was
 edited in Storyboard Pro the live move is exported and the Message Log says
-so. Gradients flatten to their base colour, blur is lost (already baked into
-pixels on import), audio gain isn't available from Storyboard Pro so clips
-export at the app's default.
+so. Group layers come out as sboardx groups (nested groups flatten to the
+innermost); layer keyframes come out as `layer_tracks` keyed by the layer's
+or group's name, one track per scene — a layer merely moved with the Layer
+Transform tool exports as a one-keyframe (static) pose. Storyboard Pro
+turns spaces and punctuation in layer names into `_` (`Main BG` becomes
+`Main_BG`); tracks follow the sanitised name. Gradients flatten to their
+base colour, blur is lost (already baked into pixels on import), audio gain
+and opacity keyframes aren't available from Storyboard Pro so clips export
+at the app's default and layers at their constant opacity.
 
 ## Batch
 
