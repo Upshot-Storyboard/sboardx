@@ -22,25 +22,45 @@ function importFromFile(zipPath, quiet, options) {
     var env = makeImportEnv(common, log, options);
     if (!checkScriptingSurface(env)) return false;
 
+    // The same window-modal progress dialog as the export (one step per
+    // panel, busy phases around it, Cancel honoured between panels).
+    env.progress = common.makeProgress("Importing .sboardx", quiet);
     zipPath = String(zipPath);
-    if (!extractArchive(env, zipPath)) return false;
-    if (!loadSboardx(env)) return false;
+    env.progress.busy("Extracting the archive…");
+    if (!extractArchive(env, zipPath)) { env.progress.close(); return false; }
+    env.progress.busy("Reading the archive…");
+    if (!loadSboardx(env)) { env.progress.close(); return false; }
 
     var preExistingScenes = listExistingScenes(env);
 
     project.beginUndoRedoAccum("Import sboardx");
     try {
         applyProjectSettings(env);
+        env.progress.begin(env.sequenceJson.panels.length);
         importScenes(env);
+        env.progress.busy("Creating sequences…");
+        importSequences(env);
         recordImportMetadata(env, zipPath);
-        if (env.replaceExisting) deleteScenes(env, preExistingScenes);
+        if (env.replaceExisting) {
+            env.progress.busy("Removing the previous scenes…");
+            deleteScenes(env, preExistingScenes);
+        }
+        env.progress.busy("Importing audio…");
         importAudio(env, globalStartFrameOf(env, env.firstImportedPanel));
         project.endUndoRedoAccum();
     } catch (err) {
+        // Cancel and failure both roll the whole import back (one undo
+        // accumulation), so the project is as it was.
         project.cancelUndoRedoAccum();
-        log.report("sboardx import failed: " + err, true);
+        env.progress.close();
+        if (err && err.sboardxCancelled) {
+            log.report("Import cancelled. The project was not changed.", true);
+        } else {
+            log.report("sboardx import failed: " + err, true);
+        }
         return false;
     }
+    env.progress.close();
 
     if (env.firstImportedPanel) {
         try { env.selMgr.setCurrentPanel(env.firstImportedPanel); } catch (e) {}
@@ -79,10 +99,11 @@ function makeImportEnv(common, log, options) {
         dialogueCaption: "",
         firstImportedPanel: "",
         scratchPalette: null,
+        sceneIdMap: {},   // source scene id -> Storyboard Pro scene id
         counts: { scenes: 0, panels: 0, layers: 0, imageLayers: 0,
                   blurredLayers: 0, failedLayers: 0, camScenes: 0,
                   camApplied: 0, groups: 0, animatedLayers: 0,
-                  opacityTracks: 0 }
+                  opacityTracks: 0, sequences: 0, sequencesFailed: 0 }
     };
 }
 
@@ -152,7 +173,11 @@ function groupScenes(sequenceJson) {
         var si = byPanel.hasOwnProperty(panelIds[i]) ? byPanel[panelIds[i]] : prev;
         if (si < 0) si = 0;
         if (!groups.length || si !== prev) {
+            // `name` is the archive's scene name (the display-code prefix
+            // panels are matched against); the Storyboard Pro scene may be
+            // named differently when it collides (see importScenes).
             groups.push({
+                srcId: raw[si] && raw[si].id ? String(raw[si].id) : "",
                 name: raw[si] && raw[si].name ? raw[si].name : ("Scene " + (groups.length + 1)),
                 panels: [],
                 keyframes: raw[si] && raw[si].camera && raw[si].camera.keyframes
@@ -198,10 +223,17 @@ function importScenes(env) {
             continue;
         }
         env.counts.scenes++;
+        if (group.srcId) env.sceneIdMap[group.srcId] = String(sceneId);
 
         var firstPanelId = importScenePanels(env, sceneId, group);
         if (group.layerTracks.length > 0 && firstPanelId) {
+            env.progress.busy("Applying layer animation (scene " + group.name + ")…");
             applyLayerTracks(env, sceneId, group);
+        }
+        if (firstPanelId && group.srcId) {
+            // Source scene id, for a re-export under the same id (the
+            // sboardx-id metadata on panels; see sboardx_export.js).
+            setSourceIdMetadata(env, firstPanelId, "sboardx-scene-id", group.srcId);
         }
         if (group.keyframes.length > 0 && firstPanelId) {
             if (applySceneCamera(env, sceneId, group.keyframes)) {
@@ -232,17 +264,40 @@ function importScenePanels(env, sceneId, group) {
             continue;
         }
 
+        var token = panelToken(meta, group.name) || String(p + 1);
+        if (env.progress.cancelled()) throw { sboardxCancelled: true };
+        env.progress.step("Panel " + token + " (scene " + group.name + ")");
         var panelId;
         if (p === 0 && env.sb.numberOfPanelsInScene(sceneId) > 0) {
             panelId = env.sb.panelInScene(sceneId, 0);
+            var renamed = false;
+            try { renamed = env.sb.renamePanel(panelId, token) === true; } catch (eR) {}
+            if (!renamed) {
+                env.log.warn("panel " + srcId + ": could not name the scene's first " +
+                             "panel '" + token + "'");
+            }
         } else {
-            panelId = env.sb.insertPanel(true, prevPanelId, String(p + 1));
+            panelId = env.sb.insertPanel(true, prevPanelId, token);
+            if ((!panelId || String(panelId).length === 0) && token !== String(p + 1)) {
+                // A name Storyboard Pro refuses: fall back to its numbering.
+                env.log.warn("panel " + srcId + ": name '" + token +
+                             "' refused, numbered " + (p + 1) + " instead");
+                panelId = env.sb.insertPanel(true, prevPanelId, String(p + 1));
+            }
         }
         if (!panelId || String(panelId).length === 0) {
             env.log.warn("could not create panel for " + srcId);
             group.sbpPanelIds.push("");
             continue;
         }
+        try {
+            var got = String(env.sb.nameOfPanel(panelId));
+            if (got !== token) {
+                env.log.warn("panel " + srcId + ": named '" + got + "' by Storyboard Pro " +
+                             "(wanted '" + token + "')");
+            }
+        } catch (eN) {}
+        setSourceIdMetadata(env, panelId, "sboardx-id", srcId);
         group.sbpPanelIds.push(String(panelId));
         prevPanelId = panelId;
         if (p === 0) firstPanelId = panelId;
@@ -260,6 +315,129 @@ function importScenePanels(env, sceneId, group) {
         importPanelLayers(env, panelId, srcId);
     }
     return firstPanelId;
+}
+
+// The panel's number: panel.json `code` is the display code
+// "<scene name>-<token>" (Upshot's convention, and this exporter's); the
+// token after the archive's scene name is the Storyboard Pro panel name. A
+// code without the prefix is the token itself.
+function panelToken(meta, sceneName) {
+    var code = meta && meta.code !== undefined ? String(meta.code) : "";
+    var prefix = sceneName + "-";
+    if (code.length > prefix.length && code.substring(0, prefix.length) === prefix) {
+        return code.substring(prefix.length);
+    }
+    return code;
+}
+
+// Source ids ride as panel metadata so TB_ExportSboardx can write the panel
+// (and, from the scene's first panel, the scene) under the id it came with —
+// an Upshot -> Storyboard Pro -> Upshot trip then keeps Upshot's ids.
+function setSourceIdMetadata(env, panelId, name, value) {
+    try {
+        env.sb.setPanelMetadata(panelId, {
+            name: name,
+            type: "string",
+            creator: "TB_ImportSboardx",
+            version: "1.0",
+            value: String(value)
+        });
+    } catch (e) {
+        env.log.warn("could not record " + name + " on panel " + panelId + ": " + e);
+    }
+}
+
+// sequence.json "sequences" (optional; contiguous runs of scene ids) ->
+// Storyboard Pro sequences over the scenes just created. Each entry becomes
+// one createSequence(first, last) per contiguous run of its created scenes
+// (a single run for a well-formed file), renamed to the archive's name (made
+// unique the way scene names are). A project that refuses (no sequence
+// support, or the API missing) imports flat, as before.
+function importSequences(env) {
+    var entries = env.sequenceJson.sequences;
+    if (!entries || !entries.length) return;
+    if (typeof env.sb.createSequence != "function") {
+        env.log.warn("sequences skipped: StoryboardManager.createSequence is not available");
+        env.counts.sequencesFailed += entries.length;
+        return;
+    }
+    var sceneIndex = {};
+    try {
+        for (var i = 0; i < env.sb.numberOfScenesInProject(); i++) {
+            sceneIndex[String(env.sb.sceneInProject(i))] = i;
+        }
+    } catch (eI) {}
+    // Names already taken, read ONCE up front (never probed per name: a
+    // per-name sequenceId() lookup that answers non-empty for unknown names
+    // would spin forever — that hung Storyboard Pro on the first run).
+    var takenNames = {};
+    try {
+        var numSeqs = env.sb.numberOfSequencesInProject();
+        for (var t = 0; t < numSeqs; t++) {
+            var existing = String(env.sb.nameOfSequence(env.sb.sequenceInProject(t)) || "");
+            if (existing) takenNames[existing] = true;
+        }
+        env.log.trace("sequences: project has " + numSeqs + " before the import");
+    } catch (eT) {
+        env.log.trace("sequences: existing names unavailable (" + eT + ")");
+    }
+
+    for (var q = 0; q < entries.length; q++) {
+        var entry = entries[q];
+        if (!entry || !entry.name || !entry.scenes || !entry.scenes.length) continue;
+        var runs = [];
+        var run = null;
+        for (var s = 0; s < entry.scenes.length; s++) {
+            var tbId = env.sceneIdMap[String(entry.scenes[s])];
+            if (!tbId || !sceneIndex.hasOwnProperty(tbId)) continue;
+            if (run && sceneIndex[tbId] === run.lastIndex + 1) {
+                run.last = tbId;
+                run.lastIndex = sceneIndex[tbId];
+            } else {
+                run = { first: tbId, last: tbId, lastIndex: sceneIndex[tbId] };
+                runs.push(run);
+            }
+        }
+        if (!runs.length) continue;
+        if (runs.length > 1) {
+            env.log.warn("sequence '" + entry.name + "' lists non-contiguous scenes; " +
+                         "created as " + runs.length + " sequences");
+        }
+        for (var r = 0; r < runs.length; r++) {
+            env.log.trace("sequence '" + entry.name + "': createSequence(" + runs[r].first +
+                          ", " + runs[r].last + ")");
+            var seqId = "";
+            try { seqId = String(env.sb.createSequence(runs[r].first, runs[r].last) || ""); }
+            catch (eC) { env.log.warn("createSequence failed for '" + entry.name + "': " + eC); }
+            if (!seqId) {
+                env.log.warn("sequence '" + entry.name + "' could not be created " +
+                             "(does the project have sequences enabled?)");
+                env.counts.sequencesFailed++;
+                continue;
+            }
+            var name = uniqueSequenceName(String(entry.name), takenNames);
+            env.log.trace("sequence " + seqId + ": renameSequence -> '" + name + "'");
+            try {
+                if (env.sb.renameSequence(seqId, name) !== true) {
+                    env.log.warn("sequence " + seqId + " could not be named '" + name + "'");
+                }
+            } catch (eR) {
+                env.log.warn("renameSequence failed for '" + name + "': " + eR);
+            }
+            env.counts.sequences++;
+        }
+    }
+}
+
+// Sequence names are unique in Storyboard Pro like scene names: a name
+// already taken (by a pre-existing sequence or one made earlier in this
+// import) becomes "<name> 2", "<name> 3", ... — the importScenes convention,
+// against a set read once (bounded; no API probing per candidate).
+function uniqueSequenceName(wanted, takenNames) {
+    var name = wanted;
+    for (var n = 2; takenNames[name] && n < 1000; n++) name = wanted + " " + n;
+    takenNames[name] = true;
+    return name;
 }
 
 function recordImportMetadata(env, zipPath) {
@@ -332,6 +510,13 @@ function importSummary(env) {
                   " vector art layer(s)" +
                   (c.imageLayers > 0
                        ? " and " + c.imageLayers + " image layer(s)" : "") + ".";
+    if (c.sequences > 0) {
+        summary += "\n\nScenes grouped into " + c.sequences + " sequence(s).";
+    }
+    if (c.sequencesFailed > 0) {
+        summary += "\n\n" + c.sequencesFailed + " sequence(s) could not be created " +
+                   "(see the Message Log); their scenes were imported without one.";
+    }
     if (c.blurredLayers > 0) {
         summary += "\n\n" + c.blurredLayers + " blurred layer(s) were " +
                    "pre-rendered to bitmap (Storyboard Pro has no per-layer " +

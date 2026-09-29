@@ -25,7 +25,12 @@ deleted. A dialog summarises what came in; warnings go to the Message Log.
 What you get:
 
 - Scenes and panels with their names and durations (the project frame rate
-  is set to the file's fps).
+  is set to the file's fps). Panel names come from the archive's display
+  code (`10-3` names the panel `3`); sequences, when the file carries them,
+  group the scenes as in the source (`createSequence`, names kept).
+- Each panel remembers the id it came with (`sboardx-id` panel metadata;
+  the scene's on its first panel), so a later export writes it under the
+  same id and a round trip through Storyboard Pro keeps the source ids.
 - Each layer as a vector drawing layer, in order, with name, opacity,
   visibility and lock. Image layers become bitmap layers. Blurred layers are
   imported as pre-blurred bitmaps, since Storyboard Pro has no layer blur.
@@ -44,7 +49,8 @@ What you get:
 Click **TB_ExportSboardx** and choose where to save. Layers are read back as
 vectors; bitmap layers and textured fills are rendered to images at the
 project resolution and cropped to the frame. Panel notes and dialogue,
-audio tracks and camera moves come along. Camera moves are read from the
+audio tracks, camera moves and sequences come along; a panel's display
+code is `<scene>-<panel>`. Camera moves are read from the
 scene's live camera: pan, scale, rotation and a Z dolly (folded into the
 zoom). Keyframes kept as `sboardx-camera` panel metadata by the importer are
 only echoed back when they still match the live camera; if the camera was

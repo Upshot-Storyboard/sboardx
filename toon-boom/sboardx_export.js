@@ -113,20 +113,55 @@ function makeExportEnv(common, log, zipPath) {
         nowIso: new Date().toISOString(),
         panelIds: [],
         scenes: [],
+        sequences: [],
+        usedIds: {},
         counts: { scenes: 0, panels: 0, layers: 0, rasterLayers: 0,
                   emptyLayers: 0, camScenes: 0, audioClips: 0, audioTracks: 0,
-                  groups: 0, animatedLayers: 0, nestedGroups: 0 }
+                  groups: 0, animatedLayers: 0, nestedGroups: 0,
+                  sequences: 0, sourceIds: 0 }
     };
+}
+
+// Ids in the archive: a panel imported by TB_ImportSboardx carries its
+// source id as panel metadata ("sboardx-id"; the scene's source id as
+// "sboardx-scene-id" on the scene's first panel), and a re-export writes it
+// under THAT id so an Upshot -> Storyboard Pro -> Upshot trip keeps Upshot's
+// ids. Otherwise the Storyboard Pro id is used. Ids are unique within the
+// file (SPEC): the first holder of a value keeps it (a duplicated panel
+// copies its metadata) and later holders fall back to a suffixed id.
+function uniqueId(env, wanted, fallback) {
+    var id = (wanted && /^[A-Za-z0-9_-]+$/.test(wanted)) ? wanted : fallback;
+    if (env.usedIds[id]) {
+        var n = 2;
+        while (env.usedIds[fallback + "-" + n]) n++;
+        id = fallback + "-" + n;
+    }
+    env.usedIds[id] = true;
+    return id;
+}
+
+function sourceId(env, panelId, metaName) {
+    try {
+        var meta = env.sb.getPanelMetadata(panelId, metaName);
+        var raw = (meta && meta.value !== undefined) ? meta.value : meta;
+        if (raw && String(raw).length > 0) return String(raw);
+    } catch (e) {}
+    return "";
 }
 
 function walkProject(env) {
     var numScenes = env.sb.numberOfScenesInProject();
+    var sceneOutIds = {};
     for (var s = 0; s < numScenes; s++) {
         var sceneId = env.sb.sceneInProject(s);
         var sceneName = String(env.sb.nameOfScene(sceneId));
         var numPanels = env.sb.numberOfPanelsInScene(sceneId);
-        var camKfs = readSceneCamera(env, sceneId,
-            numPanels > 0 ? String(env.sb.panelInScene(sceneId, 0)) : "");
+        var firstPanelId = numPanels > 0 ? String(env.sb.panelInScene(sceneId, 0)) : "";
+        var camKfs = readSceneCamera(env, sceneId, firstPanelId);
+        var sceneSrc = firstPanelId ? sourceId(env, firstPanelId, "sboardx-scene-id") : "";
+        var sceneOutId = uniqueId(env, sceneSrc, String(sceneId));
+        if (sceneOutId === sceneSrc) env.counts.sourceIds++;
+        sceneOutIds[String(sceneId)] = sceneOutId;
 
         var scenePanels = [];
         var sceneLayerInfo = [];   // per panel: the exported layer entries + SBP indices
@@ -135,14 +170,17 @@ function walkProject(env) {
             if (env.progress.cancelled()) throw { sboardxCancelled: true };
             env.progress.step("Panel " + env.sb.nameOfPanel(panelId) +
                               " (scene " + sceneName + ")");
-            env.panelIds.push(panelId);
-            scenePanels.push(panelId);
-            sceneLayerInfo.push(exportPanel(env, sceneId, sceneName, panelId, camKfs));
+            var panelSrc = sourceId(env, panelId, "sboardx-id");
+            var panelOutId = uniqueId(env, panelSrc, panelId);
+            if (panelOutId === panelSrc) env.counts.sourceIds++;
+            env.panelIds.push(panelOutId);
+            scenePanels.push(panelOutId);
+            sceneLayerInfo.push(exportPanel(env, sceneId, sceneName, panelId, panelOutId, camKfs));
         }
 
         if (camKfs.length > 0) env.counts.camScenes++;
         var sceneObj = {
-            id: String(sceneId),
+            id: sceneOutId,
             name: sceneName,
             panels: scenePanels,
             camera: { keyframes: camKfs }
@@ -153,14 +191,39 @@ function walkProject(env) {
         env.scenes.push(sceneObj);
         env.counts.scenes++;
     }
+    walkSequences(env, sceneOutIds);
 }
 
-function exportPanel(env, sceneId, sceneName, panelId, camKfs) {
-    env.log.trace("panel " + panelId);
-    var panelDir = env.stagingDir + "/panels/" + panelId;
+// Storyboard Pro sequences -> sequence.json "sequences": one entry per
+// sequence with the (exported) ids of its scenes, in order. A project without
+// sequences emits nothing (the key is optional; Upshot re-mints the ids).
+function walkSequences(env, sceneOutIds) {
+    var numSeqs = 0;
+    try { numSeqs = env.sb.numberOfSequencesInProject(); } catch (e) { return; }
+    for (var i = 0; i < numSeqs; i++) {
+        var seqId = String(env.sb.sequenceInProject(i));
+        var name = String(env.sb.nameOfSequence(seqId));
+        var scenes = [];
+        var numScenes = env.sb.numberOfScenesInSequence(seqId);
+        for (var j = 0; j < numScenes; j++) {
+            var sid = String(env.sb.sceneInSequence(seqId, j));
+            if (sceneOutIds.hasOwnProperty(sid)) scenes.push(sceneOutIds[sid]);
+        }
+        if (scenes.length === 0 || !name) continue;
+        env.sequences.push({ id: uniqueId(env, seqId, "seq-" + (i + 1)),
+                             name: name, scenes: scenes });
+        env.counts.sequences++;
+    }
+}
+
+// panelId is Storyboard Pro's (every API call); outId names the panel in the
+// archive (directory, panel.json id, SVG panel-id, image files).
+function exportPanel(env, sceneId, sceneName, panelId, outId, camKfs) {
+    env.log.trace("panel " + panelId + (outId !== panelId ? " as " + outId : ""));
+    var panelDir = env.stagingDir + "/panels/" + outId;
     new Dir(panelDir + "/art").mkdirs();
 
-    writePanelJson(env, panelDir, sceneName, panelId);
+    writePanelJson(env, panelDir, sceneName, panelId, outId);
     env.common.writeTextFile(panelDir + "/camera.json",
                              JSON.stringify({ keyframes: [] }));
 
@@ -185,7 +248,7 @@ function exportPanel(env, sceneId, sceneName, panelId, camKfs) {
     // carry the group's NAME (a nested group flattens to the innermost).
     for (li = numLayers - 1; li >= 0; li--) {
         if (groupNames.hasOwnProperty(li)) continue;
-        var entry = exportLayer(env, panelDir, panelId, li, rasterJobs);
+        var entry = exportLayer(env, panelDir, panelId, outId, li, rasterJobs);
         var owner = -1;
         try { owner = env.lm.groupOfLayer(panelId, li); } catch (eo) {}
         if (owner >= 0 && groupNames.hasOwnProperty(owner)) entry.group = groupNames[owner];
@@ -201,7 +264,7 @@ function exportPanel(env, sceneId, sceneName, panelId, camKfs) {
         }
     }
     if (rasterJobs.length > 0) {
-        rasterizePanel(env, sceneId, panelId, rasterJobs, camKfs);
+        rasterizePanel(env, sceneId, panelId, outId, rasterJobs, camKfs);
     }
     env.common.writeTextFile(panelDir + "/layers.json",
                              JSON.stringify({ layers: layers }));
@@ -345,11 +408,15 @@ function nearestPathPoint(env, panelId, col, frame) {
     return best;
 }
 
-function writePanelJson(env, panelDir, sceneName, panelId) {
+function writePanelJson(env, panelDir, sceneName, panelId, outId) {
+    // `code` is the display code "<scene>-<panel>" (the convention Upshot
+    // writes; its importer takes the token after the scene name as the
+    // panel's number). `shot` is the SPEC's shot type, which Storyboard Pro
+    // has no field for.
     var panelObj = {
-        id: panelId,
-        code: String(env.sb.nameOfPanel(panelId)),
-        shot: sceneName,
+        id: outId,
+        code: sceneName + "-" + String(env.sb.nameOfPanel(panelId)),
+        shot: "",
         dur: env.sb.getPanelDuration(panelId) / env.fps,
         note: panelCaptionText(env, env.notesCaption, panelId)
     };
@@ -358,7 +425,7 @@ function writePanelJson(env, panelDir, sceneName, panelId) {
     env.common.writeTextFile(panelDir + "/panel.json", JSON.stringify(panelObj));
 }
 
-function exportLayer(env, panelDir, panelId, li, rasterJobs) {
+function exportLayer(env, panelDir, panelId, outId, li, rasterJobs) {
     var layerName = String(env.lm.layerName(panelId, li));
     var layerId = "layer" + li;
 
@@ -377,10 +444,10 @@ function exportLayer(env, panelDir, panelId, li, rasterJobs) {
     }
 
     var art = layerSvg(env, !isBitmap && tvgPath ? { filename: tvgPath } : null,
-                       layerId, layerName, panelId);
+                       layerId, layerName, outId);
     var needsRaster = isBitmap || art.usedTexture;
     if (needsRaster && !isBitmap) {
-        art = layerSvg(env, null, layerId, layerName, panelId);
+        art = layerSvg(env, null, layerId, layerName, outId);
     }
     env.common.writeTextFile(panelDir + "/art/" + layerId + ".svg", art.svg);
 
@@ -755,7 +822,7 @@ function rasterTransform(env, w, h) {
     return [env.frameW / w, 0, 0, env.frameH / h, 0, 0];
 }
 
-function rasterizePanel(env, sceneId, panelId, jobs, camKfs) {
+function rasterizePanel(env, sceneId, panelId, outId, jobs, camKfs) {
     var lm = env.lm;
     var n = lm.numberOfLayers(panelId);
     var hasSession = true;
@@ -803,7 +870,7 @@ function rasterizePanel(env, sceneId, panelId, jobs, camKfs) {
             return;
         }
         for (var k = 0; k < jobs.length; k++) {
-            renderRasterJob(env, em, panelId, n, jobs[k]);
+            renderRasterJob(env, em, panelId, outId, n, jobs[k]);
         }
     } finally {
         if (hasSession) {
@@ -816,8 +883,8 @@ function rasterizePanel(env, sceneId, panelId, jobs, camKfs) {
     }
 }
 
-function renderRasterJob(env, em, panelId, layerCount, job) {
-    var dir = env.stagingDir + "/raster/" + panelId + "_" + job.li;
+function renderRasterJob(env, em, panelId, outId, layerCount, job) {
+    var dir = env.stagingDir + "/raster/" + outId + "_" + job.li;
     new Dir(dir).mkdirs();
     try {
         for (var j = 0; j < layerCount; j++) {
@@ -840,7 +907,7 @@ function renderRasterJob(env, em, panelId, layerCount, job) {
         return;
     }
     var src = dir + "/" + files[0];
-    var fileName = panelId + "_" + job.layerId + ".png";
+    var fileName = outId + "_" + job.layerId + ".png";
     if (!env.common.copyFile(src, env.stagingDir + "/images/" + fileName, env.log.warn)) {
         env.log.warn("could not stage the render of layer '" + job.layerName + "'");
         return;
@@ -969,10 +1036,15 @@ function writeProjectJson(env) {
 }
 
 function writeSequenceJson(env) {
-    env.common.writeTextFile(env.stagingDir + "/sequence.json", JSON.stringify({
+    var seq = {
         panels: env.panelIds,
-        scenes: env.scenes
-    }));
+        scenes: env.scenes,
+        transitions: []
+    };
+    // Optional key (absent = no sequences): pending in SPEC.md, mirrors
+    // "scenes" — contiguous runs of scene ids, one entry per sequence.
+    if (env.sequences.length > 0) seq.sequences = env.sequences;
+    env.common.writeTextFile(env.stagingDir + "/sequence.json", JSON.stringify(seq));
 }
 
 function zipStagingFolder(env) {
@@ -990,6 +1062,13 @@ function exportSummary(env) {
                   (c.rasterLayers > 0
                        ? " and " + c.rasterLayers + " image layer(s)" : "") +
                   " to\n" + env.zipPath + ".";
+    if (c.sequences > 0) {
+        summary += "\n\n" + c.sequences + " sequence(s) exported with their scenes.";
+    }
+    if (c.sourceIds > 0) {
+        summary += "\n\n" + c.sourceIds + " scene(s)/panel(s) keep the ids they " +
+                   "were imported with (sboardx-id metadata).";
+    }
     if (c.camScenes > 0) {
         summary += "\n\nCamera moves exported for " + c.camScenes + " scene(s).";
     }
