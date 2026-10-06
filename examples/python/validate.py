@@ -4,13 +4,42 @@
 
 usage: validate.py FILE.sboardx [FILE...]
 Checks: STORE-only zip, version, required entries, every art/image/audio
-reference resolves. Does not validate SVG content.
+reference resolves, sequences, derived layers, gradient references. Does
+not validate SVG geometry.
 """
 import json
+import re
 import sys
 import zipfile
 
-VERSIONS = {"1.0"}
+VERSIONS = {"1.0", "1.1"}
+
+GRADIENT_RE = re.compile(
+    r"<(linearGradient|radialGradient)\b([^>]*?)(?:/>|>(.*?)</\1>)", re.S)
+ID_RE = re.compile(r'\bid="([^"]+)"')
+HREF_RE = re.compile(r'\b(?:xlink:)?href="#([^"]+)"')
+STOP_RE = re.compile(r"<stop\b")
+FILL_URL_RE = re.compile(r'\bfill="url\(#([^)]+)\)[^"]*"')
+
+
+def check_art_svg(text, where):
+    """Every gradient fill must resolve to a gradient with >= 2 stops (its
+    own, or inherited through one level of href)."""
+    stops, hrefs = {}, {}
+    for _kind, attrs, body in GRADIENT_RE.findall(text):
+        m = ID_RE.search(attrs)
+        if not m:
+            continue
+        stops[m.group(1)] = len(STOP_RE.findall(body or ""))
+        h = HREF_RE.search(attrs)
+        if h:
+            hrefs[m.group(1)] = h.group(1)
+    for gid in FILL_URL_RE.findall(text):
+        if gid not in stops:
+            raise ValueError(f"{where}: fill url(#{gid}) has no gradient definition")
+        n = stops[gid] or stops.get(hrefs.get(gid, ""), 0)
+        if n < 2:
+            raise ValueError(f"{where}: gradient {gid} has fewer than 2 stops")
 
 
 def check(path):
@@ -56,15 +85,59 @@ def check(path):
                 if not 0 <= k.get("opacity", 1.0) <= 1:
                     raise ValueError(f"layer keyframe {k['id']}: opacity must be 0..1")
 
+    # sequences (1.1): contiguous runs of scene ids, each scene in at most one.
+    scene_ids = [s["id"] for s in seq["scenes"]]
+    if len(set(scene_ids)) != len(scene_ids):
+        raise ValueError("sequence.json: duplicate scene id")
+    seen, claimed = set(), set()
+    for q in seq.get("sequences", []):
+        qid = q.get("id")
+        if not isinstance(qid, str) or not qid or qid in seen:
+            raise ValueError(f"sequence.json: sequence id {qid!r} missing or duplicate")
+        seen.add(qid)
+        members = q.get("scenes", [])
+        if not members:
+            raise ValueError(f"sequence {qid}: no scenes")
+        idx = []
+        for sid in members:
+            if sid not in scene_ids:
+                raise ValueError(f"sequence {qid}: unknown scene {sid!r}")
+            if sid in claimed:
+                raise ValueError(f"sequence {qid}: scene {sid!r} is in two sequences")
+            claimed.add(sid)
+            idx.append(scene_ids.index(sid))
+        if idx != list(range(idx[0], idx[0] + len(idx))):
+            raise ValueError(f"sequence {qid}: scenes are not a contiguous run in order")
+
     for pid in seq["panels"]:
         need(f"panels/{pid}/panel.json")
         need(f"panels/{pid}/layers.json")
-        for layer in json.loads(z.read(f"panels/{pid}/layers.json"))["layers"]:
-            need(f"panels/{pid}/{layer['art']}")
+        layers = json.loads(z.read(f"panels/{pid}/layers.json"))["layers"]
+        layer_ids = {layer["id"] for layer in layers}
+        for layer in layers:
+            art = f"panels/{pid}/{layer['art']}"
+            need(art)
             if "image" in layer:
                 need(layer["image"]["file"])
             if not isinstance(layer.get("group", ""), str):
                 raise ValueError(f"panel {pid}: layer {layer['id']} group is not a string")
+            # Derived layers (1.1): the markers must point at layers of this panel.
+            x = layer.get("x-upshot", {})
+            if isinstance(x, dict):
+                src = x.get("derived_from")
+                if src is not None:
+                    if src not in layer_ids:
+                        raise ValueError(f"panel {pid}: layer {layer['id']} derived from unknown layer {src!r}")
+                    if x.get("role") == "raster" and "image" not in layer:
+                        raise ValueError(f"panel {pid}: raster copy {layer['id']} has no image")
+                split = x.get("split")
+                if isinstance(split, dict):
+                    if layer.get("visible", True):
+                        raise ValueError(f"panel {pid}: split source {layer['id']} must be hidden")
+                    for role in ("vector", "raster"):
+                        if role in split and split[role] not in layer_ids:
+                            raise ValueError(f"panel {pid}: split source {layer['id']} names unknown {role} copy {split[role]!r}")
+            check_art_svg(z.read(art).decode("utf-8", "replace"), art)
 
     if "audio/clips.json" in names:
         clips = json.loads(z.read("audio/clips.json"))

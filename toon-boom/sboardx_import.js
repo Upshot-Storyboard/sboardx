@@ -143,8 +143,8 @@ function loadSboardx(env) {
         env.log.report("Not a valid .sboardx file (project.json / sequence.json missing).", true);
         return false;
     }
-    if (projectJson.sboardx !== "1.0") {
-        env.log.report("This importer reads sboardx 1.0 archives. This file is sboardx " +
+    if (projectJson.sboardx !== "1.0" && projectJson.sboardx !== "1.1") {
+        env.log.report("This importer reads sboardx 1.0 and 1.1 archives. This file is sboardx " +
             (projectJson.sboardx ? String(projectJson.sboardx) : "unknown") + ".", true);
         return false;
     }
@@ -1002,13 +1002,19 @@ function importSvgAsVectorLayer(env, panelId, svgPath, layerName) {
             env.log.trace("importer.parseSVG returned no pages for " + svgPath);
             return false;
         }
+        // sboardx 1.1 paints: the SVG text is the contract for fill-opacity /
+        // stroke-opacity and gradient fills; parseSVG's own reading of them
+        // is unprobed, so the text's hints correct the primitives (see
+        // parsePaintHints). A failure here never fails the import.
+        var hints = null;
+        try { hints = parsePaintHints(env.common.readTextFile(svgPath)); } catch (eh) {}
         env.selMgr.setCurrentPanel(panelId);
         env.lm.addVectorLayer(panelId, 0, true, String(layerName));
         layerAdded = true;
         var addedName = env.lm.layerName(panelId, 0);
         env.selMgr.setLayerSelection([{ name: addedName, panelId: panelId }]);
         Tools.createDrawing({ allFrames: true });
-        drawSvgPage(env, data.pages[0], data.textures);
+        drawSvgPage(env, data.pages[0], data.textures, hints);
         return true;
     } catch (e) {
         env.log.trace("vector import failed for " + svgPath + ": " + e);
@@ -1019,7 +1025,7 @@ function importSvgAsVectorLayer(env, panelId, svgPath, layerName) {
     }
 }
 
-function drawSvgPage(env, page, textures) {
+function drawSvgPage(env, page, textures, hints) {
     var palette = scratchPalette(env);
     var snapshotIds = paletteColorIdList(palette);
     var trackedIds = [];
@@ -1027,8 +1033,17 @@ function drawSvgPage(env, page, textures) {
 
     var layers = [];
     var prims = page.primitives || [];
+    // One primitive per <path> is what every sboardx writer emits; when the
+    // counts agree the text's paint hints apply by index, otherwise the
+    // parser's paints stand (VECTOR_IMPORT_SPEC §2 keeps document order).
+    var applyHints = hints && hints.paths && hints.paths.length === prims.length;
+    if (hints && !applyHints && hints.paths && hints.paths.length) {
+        env.log.trace("paint hints skipped: " + hints.paths.length + " <path> tags vs " +
+                      prims.length + " primitives");
+    }
     for (var i = 0; i < prims.length; i++) {
-        var layer = buildPrimitiveLayer(prims[i], textures, xf, palette, trackedIds);
+        if (applyHints) applyPaintHint(env, prims[i], hints.paths[i], hints.gradients);
+        var layer = buildPrimitiveLayer(env, prims[i], textures, xf, palette, trackedIds);
         if (layer !== null) {
             layers.push(layer);
         }
@@ -1086,7 +1101,7 @@ function transformedShaderMatrix(m, xf) {
     };
 }
 
-function buildPrimitiveLayer(p, textures, xf, palette, trackedIds) {
+function buildPrimitiveLayer(env, p, textures, xf, palette, trackedIds) {
     if (!p.fill && !p.stroke) {
         return null;
     }
@@ -1099,9 +1114,21 @@ function buildPrimitiveLayer(p, textures, xf, palette, trackedIds) {
         if (p.textureName && textures && textures[p.textureName]) {
             texEntry = textures[p.textureName];
         }
+        var grad = texEntry === null ? gradientSpecOf(p) : null;
         if (texEntry !== null) {
             shaderColorId = resolveTextureColorId(palette, texEntry, trackedIds);
             shaderMatrix = transformedShaderMatrix(p.matrix, xf);
+        } else if (grad !== null) {
+            // sboardx 1.1 gradient fill: a gradient palette colour plus the
+            // shape's shader matrix (the texture mechanism); first stop when
+            // this Storyboard Pro has no gradient colour API.
+            var gid = resolveGradientColorId(env, palette, grad, trackedIds);
+            if (gid !== null) {
+                shaderColorId = gid;
+                shaderMatrix = gradientShaderMatrix(grad, p, xf);
+            } else {
+                shaderColorId = resolveSolidColorId(palette, p.fillColor, trackedIds);
+            }
         } else {
             shaderColorId = resolveSolidColorId(palette, p.fillColor, trackedIds);
         }
@@ -1141,6 +1168,381 @@ function buildPrimitiveLayer(p, textures, xf, palette, trackedIds) {
         layerType: 10001,
         strokes: strokes
     };
+}
+
+// ── Paint hints from the SVG text (sboardx 1.1) ─────────────────────────────
+//
+// importer.parseSVG is the geometry source. Whether it carries fill-opacity /
+// stroke-opacity into fillColor.a / strokeColor.a, and what it reports for a
+// `url(#id)` gradient fill, is unprobed (VECTOR_IMPORT_SPEC §9), while the
+// SVG text is the format's contract. So the <path> tags are read in document
+// order and each primitive's paint is corrected from its tag:
+//   - alpha becomes the SMALLER of the parser's and the text's — idempotent
+//     when the parser already honoured the attribute, a fix when it dropped it;
+//   - a `url(#id)` fill attaches the text's gradient definition (`sbxGradient`
+//     on the primitive) with its stops' alpha, which the parser's `gradient`
+//     array lacks.
+// Everything here is tolerant: a malformed attribute leaves the parser's
+// value in place.
+
+function parsePaintHints(svgText) {
+    var text = String(svgText || "");
+    var tags = text.match(/<path\b[^>]*>/g);
+    var hints = { paths: [], gradients: parseSvgGradients(text) };
+    if (!tags) return hints;
+    for (var i = 0; i < tags.length; i++) {
+        var tag = tags[i];
+        var fill = attrOf(tag, "fill");
+        var h = { fillAlpha: null, strokeAlpha: null, gradientId: null, bbox: null };
+        if (fill && fill !== "none") {
+            var url = /^url\(#([^)]+)\)/.exec(fill);
+            if (url) {
+                h.gradientId = url[1];
+                var dm = attrOf(tag, "d");
+                if (dm) h.bbox = bboxOfPathData(dm);
+                var fo = parseFloat(attrOf(tag, "fill-opacity"));
+                if (isFinite(fo)) h.fillAlpha = clamp01(fo);   // third-party: scales the stops
+            } else {
+                h.fillAlpha = tagAlpha(tag, "fill-opacity");
+            }
+        }
+        var stroke = attrOf(tag, "stroke");
+        if (stroke && stroke !== "none") h.strokeAlpha = tagAlpha(tag, "stroke-opacity");
+        hints.paths.push(h);
+    }
+    return hints;
+}
+
+function attrOf(tag, name) {
+    var m = new RegExp("(?:^|\\s)" + name.replace(/[.:-]/g, "\\$&") + "=\"([^\"]*)\"").exec(tag);
+    return m ? m[1] : null;
+}
+
+function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+// A path's paint alpha from its tag: sboardx:rgba's 4th number wins, then the
+// opacity attribute; null when the tag says nothing.
+function tagAlpha(tag, opacityAttr) {
+    var rgba = attrOf(tag, "sboardx:rgba");
+    if (rgba) {
+        var parts = rgba.replace(/^\s+|\s+$/g, "").split(/\s+/);
+        if (parts.length === 4) {
+            var a = parseFloat(parts[3]);
+            if (isFinite(a)) return clamp01(a);
+        }
+    }
+    var o = parseFloat(attrOf(tag, opacityAttr));
+    return isFinite(o) ? clamp01(o) : null;
+}
+
+function bboxOfPathData(d) {
+    var nums = String(d).match(/[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/g);
+    if (!nums || nums.length < 2) return null;
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (var i = 0; i + 1 < nums.length; i += 2) {
+        var x = parseFloat(nums[i]), y = parseFloat(nums[i + 1]);
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    return isFinite(minX) ? { minX: minX, minY: minY, maxX: maxX, maxY: maxY } : null;
+}
+
+// <linearGradient>/<radialGradient> definitions anywhere in the file, keyed
+// by id: SPEC.md "Gradient fills" (Upshot's unit space + gradientTransform)
+// and the common third-party forms (objectBoundingBox, explicit coordinates,
+// transform lists, style stops, one level of href stop inheritance).
+function parseSvgGradients(text) {
+    var out = {};
+    // Both the open form (with <stop> children) and the self-closing form
+    // (a stops-only template referenced through href).
+    var re = /<(linearGradient|radialGradient)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/\1>)/g;
+    var m;
+    while ((m = re.exec(text)) !== null) {
+        var attrs = m[2], body = m[3] || "";
+        var id = attrOf(attrs, "id");
+        if (!id) continue;
+        var g = {
+            type: m[1] === "radialGradient" ? "radial" : "linear",
+            units: attrOf(attrs, "gradientUnits") || "objectBoundingBox",
+            transform: parseTransformList(attrOf(attrs, "gradientTransform")),
+            x1: attrOf(attrs, "x1"), y1: attrOf(attrs, "y1"),
+            x2: attrOf(attrs, "x2"), y2: attrOf(attrs, "y2"),
+            cx: attrOf(attrs, "cx"), cy: attrOf(attrs, "cy"), r: attrOf(attrs, "r"),
+            href: (attrOf(attrs, "href") || attrOf(attrs, "xlink:href") || "").replace(/^#/, ""),
+            stops: []
+        };
+        var stopTags = body.match(/<stop\b[^>]*>/g) || [];
+        for (var s = 0; s < stopTags.length; s++) {
+            var st = parseStop(stopTags[s]);
+            if (st) g.stops.push(st);
+        }
+        out[id] = g;
+    }
+    // One level of stop inheritance.
+    for (var k in out) {
+        if (out.hasOwnProperty(k) && out[k].stops.length === 0 && out[k].href && out[out[k].href]) {
+            out[k].stops = out[out[k].href].stops.slice();
+        }
+    }
+    return out;
+}
+
+// A stop as {r,g,b,a} in 0..1 plus t (offset 0..1).
+function parseStop(tag) {
+    var offset = attrOf(tag, "offset") || "0";
+    var t = /%$/.test(offset) ? parseFloat(offset) / 100 : parseFloat(offset);
+    if (!isFinite(t)) t = 0;
+    var color = attrOf(tag, "stop-color");
+    var opacity = attrOf(tag, "stop-opacity");
+    var style = attrOf(tag, "style");
+    if (style) {
+        var sc = /stop-color\s*:\s*([^;]+)/.exec(style);
+        var so = /stop-opacity\s*:\s*([^;]+)/.exec(style);
+        if (sc && !color) color = sc[1].replace(/^\s+|\s+$/g, "");
+        if (so && opacity === null) opacity = so[1].replace(/^\s+|\s+$/g, "");
+    }
+    var rgba = attrOf(tag, "sboardx:rgba");
+    var r = 0, g = 0, b = 0, a = 1;
+    if (rgba) {
+        var parts = rgba.replace(/^\s+|\s+$/g, "").split(/\s+/);
+        if (parts.length === 4) {
+            r = parseFloat(parts[0]); g = parseFloat(parts[1]);
+            b = parseFloat(parts[2]); a = parseFloat(parts[3]);
+        }
+    } else if (color) {
+        var hex = /^#([0-9a-fA-F]{6})$/.exec(color);
+        var hex3 = /^#([0-9a-fA-F]{3})$/.exec(color);
+        if (hex) {
+            r = parseInt(hex[1].substring(0, 2), 16) / 255;
+            g = parseInt(hex[1].substring(2, 4), 16) / 255;
+            b = parseInt(hex[1].substring(4, 6), 16) / 255;
+        } else if (hex3) {
+            r = parseInt(hex3[1].charAt(0) + hex3[1].charAt(0), 16) / 255;
+            g = parseInt(hex3[1].charAt(1) + hex3[1].charAt(1), 16) / 255;
+            b = parseInt(hex3[1].charAt(2) + hex3[1].charAt(2), 16) / 255;
+        }
+        var op = parseFloat(opacity);
+        if (isFinite(op)) a = op;
+    }
+    if (![r, g, b, a].every(isFinite)) return null;
+    return { r: clamp01(r), g: clamp01(g), b: clamp01(b), a: clamp01(a), t: clamp01(t) };
+}
+
+// matrix(a b c d e f) | translate(tx[,ty]) | scale(sx[,sy]) | rotate(deg[,cx,cy])
+// lists, composed left to right as SVG does; null when absent or unreadable.
+function parseTransformList(text) {
+    if (!text) return null;
+    var re = /(matrix|translate|scale|rotate)\s*\(([^)]*)\)/g;
+    var acc = [1, 0, 0, 1, 0, 0];
+    var any = false, m;
+    while ((m = re.exec(text)) !== null) {
+        var v = m[2].split(/[\s,]+/).filter(function (s) { return s.length; }).map(parseFloat);
+        if (v.some(function (x) { return !isFinite(x); })) return null;
+        var t;
+        if (m[1] === "matrix" && v.length === 6) t = v;
+        else if (m[1] === "translate") t = [1, 0, 0, 1, v[0] || 0, v.length > 1 ? v[1] : 0];
+        else if (m[1] === "scale") t = [v[0], 0, 0, v.length > 1 ? v[1] : v[0], 0, 0];
+        else if (m[1] === "rotate") {
+            var rad = (v[0] || 0) * Math.PI / 180, c = Math.cos(rad), s = Math.sin(rad);
+            t = [c, s, -s, c, 0, 0];
+            if (v.length === 3) {
+                t = composeAffine(composeAffine([1, 0, 0, 1, -v[1], -v[2]], t), [1, 0, 0, 1, v[1], v[2]]);
+            }
+        } else return null;
+        acc = composeAffine(t, acc);   // SVG: the rightmost transform applies first
+        any = true;
+    }
+    return any ? acc : null;
+}
+
+// "first then second": the point goes through `first`, then `second`.
+function composeAffine(first, second) {
+    return [
+        first[0] * second[0] + first[1] * second[2],
+        first[0] * second[1] + first[1] * second[3],
+        first[2] * second[0] + first[3] * second[2],
+        first[2] * second[1] + first[3] * second[3],
+        first[4] * second[0] + first[5] * second[2] + second[4],
+        first[4] * second[1] + first[5] * second[3] + second[5]
+    ];
+}
+
+// A length attribute of a gradient: number, or a percentage of `extent`.
+function gradLen(v, fallback, extent) {
+    if (v === null || v === undefined) return fallback;
+    var s = String(v);
+    var n = parseFloat(s);
+    if (!isFinite(n)) return fallback;
+    return /%$/.test(s) ? n / 100 * extent : n;
+}
+
+// Unit gradient space -> the SVG's user space (SPEC.md "Gradient fills"):
+// linear = the (0,0)->(1,0) segment, radial = the unit circle. Composes the
+// canonical frame, gradientTransform and the objectBoundingBox frame.
+function gradientUnitAffine(g, bbox, viewW, viewH) {
+    var obb = g.units !== "userSpaceOnUse";
+    var ew = obb ? 1 : viewW, eh = obb ? 1 : viewH;
+    var L;
+    if (g.type === "linear") {
+        var x1 = gradLen(g.x1, 0, ew), y1 = gradLen(g.y1, 0, eh);
+        var x2 = gradLen(g.x2, ew, ew), y2 = gradLen(g.y2, 0, eh);
+        var dx = x2 - x1, dy = y2 - y1;
+        L = [dx, dy, -dy, dx, x1, y1];
+    } else {
+        var cx = gradLen(g.cx, 0.5 * ew, ew), cy = gradLen(g.cy, 0.5 * eh, eh);
+        var r = gradLen(g.r, 0.5 * ew, ew);
+        L = [r, 0, 0, r, cx, cy];
+    }
+    var M = g.transform ? composeAffine(L, g.transform) : L;
+    if (obb) {
+        if (!bbox) return null;
+        var B = [bbox.maxX - bbox.minX, 0, 0, bbox.maxY - bbox.minY, bbox.minX, bbox.minY];
+        M = composeAffine(M, B);
+    }
+    return M;
+}
+
+function applyPaintHint(env, p, h, gradients) {
+    if (!p || !h) return;
+    if (p.fill && h.gradientId && gradients && gradients[h.gradientId]) {
+        var g = gradients[h.gradientId];
+        if (g.stops.length >= 2) {
+            var stops = g.stops.map(function (s) {
+                var a = h.fillAlpha !== null ? s.a * h.fillAlpha : s.a;
+                return { r: s.r, g: s.g, b: s.b, a: a, t: s.t };
+            });
+            p.sbxGradient = {
+                type: g.type, stops: stops,
+                affine: gradientUnitAffine(g, h.bbox, env.frameW || 960, env.frameH || 540)
+            };
+            if (!p.fillColor) p.fillColor = {};
+            p.fillColor.r = stops[0].r; p.fillColor.g = stops[0].g;
+            p.fillColor.b = stops[0].b; p.fillColor.a = stops[0].a;
+            return;
+        } else if (g.stops.length === 1) {
+            p.fillColor = { r: g.stops[0].r, g: g.stops[0].g, b: g.stops[0].b, a: g.stops[0].a };
+            return;
+        }
+    }
+    if (p.fill && p.fillColor && h.fillAlpha !== null && !p.fillColor.hasOwnProperty("gradient")) {
+        var fa = (typeof p.fillColor.a === "number") ? p.fillColor.a : 1;
+        p.fillColor.a = Math.min(fa, h.fillAlpha);
+    }
+    if (p.stroke && p.strokeColor && h.strokeAlpha !== null) {
+        var sa = (typeof p.strokeColor.a === "number") ? p.strokeColor.a : 1;
+        p.strokeColor.a = Math.min(sa, h.strokeAlpha);
+    }
+}
+
+// The gradient a primitive should be filled with: the text's definition
+// first (it carries stop alpha and the unit affine), else the parser's
+// `gradient` array (stops without alpha; its `gradientType`/`gradientMatrix`
+// ride along for the shader matrix). null for a flat fill.
+function gradientSpecOf(p) {
+    if (p.sbxGradient && p.sbxGradient.stops && p.sbxGradient.stops.length >= 2) return p.sbxGradient;
+    var c = p.fillColor;
+    if (c && c.hasOwnProperty("gradient") && c.gradient && c.gradient.length >= 2) {
+        var stops = [];
+        for (var i = 0; i < c.gradient.length; i++) {
+            var s = c.gradient[i];
+            stops.push({ r: s.r, g: s.g, b: s.b, a: (typeof s.a === "number") ? s.a : 1,
+                         t: (typeof s.t === "number") ? s.t : i / (c.gradient.length - 1) });
+        }
+        var radial = String(c.gradientType || "").toLowerCase().indexOf("radial") >= 0;
+        return { type: radial ? "radial" : "linear", stops: stops, affine: null,
+                 parserMatrix: c.gradientMatrix || p.matrix || null };
+    }
+    return null;
+}
+
+// The shape's shader matrix for a gradient colour, in page space (the
+// texture convention: `transformedShaderMatrix` on the parser's matrix). When
+// only the text's unit affine is known, the gradient is FITTED to the
+// primitive's page-space bounds at the affine's angle — the rule Upshot
+// itself used to place it — because the parser's page space (y-up, see
+// pageTransform) and the SVG's user space differ by a flip the probe on the
+// Windows machine has not pinned yet. PROBE ITEM (VECTOR_IMPORT_SPEC §9):
+// Storyboard Pro's gradient unit space; this assumes the texture matrix's.
+function gradientShaderMatrix(grad, p, xf) {
+    if (grad.parserMatrix) return transformedShaderMatrix(grad.parserMatrix, xf);
+    var bb = primitiveBounds(p);
+    if (!bb) return null;
+    var w = bb.maxX - bb.minX, h = bb.maxY - bb.minY;
+    var cx = (bb.minX + bb.maxX) / 2, cy = (bb.minY + bb.maxY) / 2;
+    if (grad.type === "radial") {
+        return { ox: cx, oy: cy, xx: w / 2, xy: 0, yx: 0, yy: h / 2 };
+    }
+    var angle = grad.affine ? -Math.atan2(grad.affine[1], grad.affine[0]) : 0;   // y flipped page space
+    var c = Math.cos(angle), s = Math.sin(angle);
+    var e = (Math.abs(w * c) + Math.abs(h * s)) / 2;
+    var len = Math.max(2 * e, 1e-6);
+    return { ox: cx - e * c, oy: cy - e * s, xx: len * c, xy: len * s, yx: -len * s, yy: len * c };
+}
+
+function primitiveBounds(p) {
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    var paths = p.paths || [];
+    for (var i = 0; i < paths.length; i++) {
+        for (var j = 0; j < paths[i].length; j++) {
+            var pt = paths[i][j];
+            if (pt.x < minX) minX = pt.x; if (pt.x > maxX) maxX = pt.x;
+            if (pt.y < minY) minY = pt.y; if (pt.y > maxY) maxY = pt.y;
+        }
+    }
+    return isFinite(minX) ? { minX: minX, minY: minY, maxX: maxX, maxY: maxY } : null;
+}
+
+// Gradient palette colours (sboardx 1.1). PROBE ITEM: the creation calls
+// are Harmony's names (`createNewLinearGradientColor` /
+// `createNewRadialGradientColor`, colorData = [{r,g,b,a,t}] 8-bit ints with
+// t 0..1); when this Storyboard Pro lacks them the caller falls back to the
+// first stop as a solid colour, so an import never fails on a gradient.
+function resolveGradientColorId(env, palette, grad, trackedIds) {
+    var fn = grad.type === "radial" ? "createNewRadialGradientColor" : "createNewLinearGradientColor";
+    if (typeof palette[fn] !== "function") {
+        if (!env.gradientApiWarned) {
+            env.gradientApiWarned = true;
+            env.log.warn("This Storyboard Pro has no " + fn + "; gradient fills import as their first stop.");
+        }
+        return null;
+    }
+    var data = [], key = grad.type;
+    for (var i = 0; i < grad.stops.length; i++) {
+        var s = grad.stops[i];
+        var st = { r: Math.floor(s.r * 255), g: Math.floor(s.g * 255), b: Math.floor(s.b * 255),
+                   a: Math.floor(s.a * 255), t: Math.round(s.t * 1000) / 1000 };
+        data.push(st);
+        key += "_" + st.r + "_" + st.g + "_" + st.b + "_" + st.a + "_" + st.t;
+    }
+    var name = "Gradient_" + hashString(key);
+    var id = findColorIdByName(palette, name);
+    if (id === null) {
+        try {
+            id = palette[fn](name, data).id;
+        } catch (e) {
+            env.log.warn("gradient colour creation failed (" + e + "); using the first stop");
+            return null;
+        }
+    }
+    trackColorId(trackedIds, id);
+    return id;
+}
+
+function findColorIdByName(palette, name) {
+    for (var i = 0; i < palette.nColors; i++) {
+        var c = palette.getColorByIndex(i);
+        if (c && c.isValid && !c.isTexture && c.name === name) return c.id;
+    }
+    return null;
+}
+
+function hashString(s) {
+    var h = 2166136261;
+    for (var i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = (h * 16777619) >>> 0;
+    }
+    return ("00000000" + h.toString(16)).slice(-8);
 }
 
 // Scratch palette
@@ -1392,6 +1794,45 @@ function painterPathFromD(env, d) {
     return path;
 }
 
+// The brush for a <path> in the blur raster: a gradient brush for a
+// `url(#id)` fill when the definition is known (QLinearGradient /
+// QRadialGradient in unit space under a QTransform of the unit->user affine),
+// else the flat colour. Degrades to the first stop when a Qt call is not
+// scriptable here.
+function pathFillBrush(env, tagText, gradients) {
+    var fill = /\bfill="([^"]*)"/.exec(tagText);
+    var url = fill ? /^url\(#([^)]+)\)/.exec(fill[1]) : null;
+    if (url && gradients && gradients[url[1]]) {
+        var g = gradients[url[1]];
+        if (g.stops.length === 0) return null;
+        var first = g.stops[0];
+        var firstColor = new QColor(Math.round(first.r * 255), Math.round(first.g * 255),
+                                    Math.round(first.b * 255), Math.round(first.a * 255));
+        if (g.stops.length === 1) return new QBrush(firstColor);
+        try {
+            var dm = /\bd="([^"]*)"/.exec(tagText);
+            var M = gradientUnitAffine(g, dm ? bboxOfPathData(dm[1]) : null,
+                                       env.frameW || 960, env.frameH || 540);
+            if (!M) return new QBrush(firstColor);
+            var qg = g.type === "radial" ? new QRadialGradient(0, 0, 1) : new QLinearGradient(0, 0, 1, 0);
+            for (var i = 0; i < g.stops.length; i++) {
+                var s = g.stops[i];
+                qg.setColorAt(s.t, new QColor(Math.round(s.r * 255), Math.round(s.g * 255),
+                                              Math.round(s.b * 255), Math.round(s.a * 255)));
+            }
+            var brush = new QBrush(qg);
+            // QTransform(m11, m12, m21, m22, dx, dy): x' = m11 x + m21 y + dx — the
+            // [a b c d tx ty] layout verbatim.
+            brush.setTransform(new QTransform(M[0], M[1], M[2], M[3], M[4], M[5]));
+            return brush;
+        } catch (e) {
+            return new QBrush(firstColor);
+        }
+    }
+    var color = pathFillColor(tagText);
+    return color ? new QBrush(color) : null;
+}
+
 function pathFillColor(tagText) {
     var a = 1.0;
     var fo = /\bfill-opacity="([^"]*)"/.exec(tagText);
@@ -1470,6 +1911,8 @@ function renderBlurredVectorPng(env, artPath, sigmaWorld, outPath) {
     if (!svgText) return null;
     var tags = String(svgText).match(/<path\b[^>]*>/g);
     if (!tags || tags.length === 0) return null;
+    var gradients = null;
+    try { gradients = parseSvgGradients(String(svgText)); } catch (eg) {}
 
     var fills = [];
     var minX = 0, minY = 0, maxX = 0, maxY = 0, haveBox = false;
@@ -1478,8 +1921,8 @@ function renderBlurredVectorPng(env, artPath, sigmaWorld, outPath) {
         if (!dm) return null;
         var path = painterPathFromD(env, dm[1]);
         if (!path) return null;
-        var color = pathFillColor(tags[i]);
-        if (!color) continue;
+        var brush = pathFillBrush(env, tags[i], gradients);
+        if (!brush) continue;
         var r = path.boundingRect();
         if (!haveBox) {
             minX = r.x(); minY = r.y();
@@ -1491,7 +1934,7 @@ function renderBlurredVectorPng(env, artPath, sigmaWorld, outPath) {
             maxX = Math.max(maxX, r.x() + r.width());
             maxY = Math.max(maxY, r.y() + r.height());
         }
-        fills.push({ path: path, color: color });
+        fills.push({ path: path, brush: brush });
     }
     if (!haveBox || fills.length === 0) return null;
     if (!(maxX > minX) && !(maxY > minY)) return null;
@@ -1513,7 +1956,7 @@ function renderBlurredVectorPng(env, artPath, sigmaWorld, outPath) {
     p.scale(ppu, ppu);
     p.translate(-minX, -minY);
     for (var f = 0; f < fills.length; f++) {
-        p.fillPath(fills[f].path, new QBrush(fills[f].color));
+        p.fillPath(fills[f].path, fills[f].brush);
     }
     p.end();
 

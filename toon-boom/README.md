@@ -4,7 +4,9 @@ Two scripts: `TB_ImportSboardx` brings a `.sboardx` into the open project as
 editable vector layers, with timing, notes, dialogue, audio and camera moves.
 `TB_ExportSboardx` writes the open project out as a `.sboardx`.
 
-Needs **Storyboard Pro 24 or newer** (tested on 27).
+Needs **Storyboard Pro 24 or newer** (tested on 27). The scripts write
+sboardx 1.1 and read 1.0 and 1.1 archives; update them before importing a
+1.1 file, an older copy refuses it.
 
 ## Install
 
@@ -34,6 +36,13 @@ What you get:
 - Each layer as a vector drawing layer, in order, with name, opacity,
   visibility and lock. Image layers become bitmap layers. Blurred layers are
   imported as pre-blurred bitmaps, since Storyboard Pro has no layer blur.
+  A file written by Upshot with textured pencil art arrives as a hidden
+  source layer plus visible `_vector` and `_raster` copies (sboardx 1.1
+  derived layers); they import as they are.
+- Fill and pencil-line colours keep their opacity (`fill-opacity`,
+  `stroke-opacity`). Gradient fills become gradient palette colours placed
+  on the shape; on a Storyboard Pro without the gradient colour API they
+  import as their first stop and the Message Log says so.
 - Layer groups as Storyboard Pro group layers, members inside.
 - Layer and group animation as layer keyframes: a track is split at every
   panel cut (Storyboard Pro keys live per panel) with boundary keys so the
@@ -60,10 +69,13 @@ innermost); layer keyframes come out as `layer_tracks` keyed by the layer's
 or group's name, one track per scene — a layer merely moved with the Layer
 Transform tool exports as a one-keyframe (static) pose. Storyboard Pro
 turns spaces and punctuation in layer names into `_` (`Main BG` becomes
-`Main_BG`); tracks follow the sanitised name. Gradients flatten to their
-base colour, blur is lost (already baked into pixels on import), audio gain
-and opacity keyframes aren't available from Storyboard Pro so clips export
-at the app's default and layers at their constant opacity.
+`Main_BG`); tracks follow the sanitised name. Colour opacity exports as
+`fill-opacity` / `stroke-opacity`; a gradient fill exports as an SVG
+gradient when Storyboard Pro exposes the colour's stops and the shape's
+gradient matrix, otherwise it flattens to its first stop. Blur is lost
+(already baked into pixels on import), audio gain and opacity keyframes
+aren't available from Storyboard Pro so clips export at the app's default
+and layers at their constant opacity.
 
 ## Batch
 

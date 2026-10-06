@@ -34,7 +34,8 @@ audio/clips.json + audio/*   clips, tracks, embedded audio files
 images/*                     embedded images for image layers
 ```
 
-Full details: [SPEC.md](SPEC.md). Current version: **1.0**.
+Full details: [SPEC.md](SPEC.md). Current version: **1.1** (readers also
+accept 1.0 files).
 
 ## Repo contents
 

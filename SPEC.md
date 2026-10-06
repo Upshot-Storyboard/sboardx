@@ -1,4 +1,4 @@
-# sboardx 1.0
+# sboardx 1.1
 
 The storyboard package format. A `.sboardx` file is an uncompressed zip
 holding JSON for structure and one SVG per layer for art.
@@ -6,6 +6,16 @@ holding JSON for structure and one SVG per layer for art.
 Design goals, in order: readable with stock tools (`unzip`, a browser, any
 SVG editor), the SVG is the only copy of the art, additive evolution
 (readers ignore what they don't know).
+
+**Version 1.1** is 1.0 plus the additions marked *1.1* below (sequences,
+pencil strokes and their derived layers, gradient fills) and the
+documentation of what 1.0 writers were already emitting. Every addition is
+optional with an "as before" default, so a 1.0 file is a valid 1.1 file;
+1.1 collects them under one version string so a reader can say what it
+supports. A 1.1 reader must accept 1.0 files. The `sboardx` XML namespace
+URI stays `https://sboardx.format/ns/1.0`: it names the attribute
+vocabulary, not the spec version, and 1.1 only adds attributes to it.
+Readers match the prefix and take the version from `project.json`.
 
 ## Container
 
@@ -71,7 +81,7 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
 
 ```json
 {
-  "sboardx": "1.0",
+  "sboardx": "1.1",
   "app": "Upshot",
   "name": "My Board",
   "episode": "EP01",
@@ -89,7 +99,7 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
 
 | Key | Type | Notes |
 |---|---|---|
-| `sboardx` | string | Format version. Readers accept exactly the versions they know. |
+| `sboardx` | string | Format version: `1.0` or `1.1`. Readers accept exactly the versions they know. |
 | `app` | string | Producer name, free text. |
 | `name`, `episode` | string | Display metadata. `episode` may be empty. |
 | `created_at`, `modified_at` | string | ISO-8601 UTC. |
@@ -97,6 +107,17 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
 | `canvas.resolution.width/height` | int | Render size in pixels. |
 | `canvas.fps` | number | Frame rate. Durations are stored in seconds; this is the grid they were authored on (Upshot uses 24). |
 | `x-upshot` | object | Optional vendor block (editor state). See "Extending the format". |
+
+**Upshot's `x-upshot` block in `project.json`** is editor state, written on
+every export and read back only for `last_panel_id` / `last_layer_id` (the
+panel and layer Upshot reopens on): `theme`, `accent` (strings),
+`px_per_sec` (double, timeline zoom), `last_panel_id`, `last_layer_id`
+(strings), `brush_size` (double), `brush_color` (`#rrggbb`), `zoom`
+(double), `onion_skin` (bool), `playhead` (seconds), `layers_collapsed`,
+`timeline_collapsed` (bool). Files written before the app was renamed carry
+the same blocks under the key `x-the-storyboard-app`; Upshot still accepts
+that key on import. A `project.json` with neither block is treated by
+Upshot as another writer's archive (see `code` under `panel.json`).
 
 ### sequence.json
 
@@ -126,6 +147,9 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
         }
       ]
     }
+  ],
+  "sequences": [
+    { "id": "seq-1", "name": "Act 1", "scenes": ["sc-1"] }
   ],
   "transitions": []
 }
@@ -157,6 +181,14 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
   both ends. A layer that matches both its own track and its group's is
   posed by its own track first, then by the group's (the group pose
   applies to the already-posed layer); opacities multiply.
+- `sequences` (optional, default none; *1.1*): a grouping above scenes
+  (Toon Boom's sequences). Each entry is a contiguous run of scene ids, in
+  order, mirroring how scenes list panels; the runs need not cover every
+  scene, and a scene belongs to at most one sequence. `id` is unique within
+  the file, `name` is the display name. Writers emit the key only when at
+  least one scene is in a sequence. Upshot stores the sequence *name* on
+  each scene and re-mints ids on export (`seq-1`, `seq-2`, …), so a round
+  trip keeps names, not ids; the Toon Boom bridge also matches by name.
 - `transitions`: reserved, always `[]`. Writers should emit it; readers
   must not require it.
 
@@ -177,12 +209,12 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
 | Key | Type | Notes |
 |---|---|---|
 | `id` | string | Same as the directory name. |
-| `code` | string | Display code, e.g. `01-A`. Free text. |
+| `code` | string | Display code, free text, shown verbatim by readers. Upshot writes `<scene name>-<token>` (`10-1`, `CHASE-Crash`). For an archive without a vendor block Upshot resolves codes on import: a token that is not the panel's automatic number becomes the panel's custom name. |
 | `shot` | string | Shot type, free text (`WS`, `CU`, …). May be empty. |
 | `dur` | seconds | Panel duration. > 0. |
 | `note` | string | Panel notes. May be empty. |
 | `dialogue` | string | Optional. Absent means empty. Maps to the *Dialogue* caption in Toon Boom. |
-| `x-upshot` | object | Optional vendor block. `stroke_set`/`layer_counter`/`name` (the user's custom part of `code`, e.g. `Crash` in `CHASE-Crash`) let Upshot re-import its own files exactly; other readers ignore it. |
+| `x-upshot` | object | Optional vendor block: `sketch` (legacy, always `""`), `stroke_set` (bool: whether the panel had a stroke entry at all, so an empty panel re-imports as empty), `layer_counter` (int, the highest automatic "Layer N" ever minted, only when non-zero), `name` (the user's custom part of `code`, e.g. `Crash` in `CHASE-Crash`). Lets Upshot re-import its own files exactly; other readers ignore it. |
 
 ### panels/\<id\>/layers.json
 
@@ -236,6 +268,61 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
 | `image.file` | string | Archive entry path (`images/<name>`). PNG or JPEG. |
 | `image.w`, `image.h` | int | Natural pixel size of the file. |
 | `image.transform` | [a,b,c,d,tx,ty] | Affine from image space to world. Image space is the `w × h` pixel rect **centred on its own origin**, y down. `x' = a·x + c·y + tx`, `y' = b·x + d·y + ty`. |
+| `x-upshot` | object | Optional vendor block (*1.1*). See "Derived layers" below. |
+
+#### Derived layers (pencil split, 1.1)
+
+Upshot's textured pencil renders a stroke from a centreline and a stamping
+recipe that are not public. So that every reader still shows the texture,
+a layer that holds pencil strokes is written as **up to three layers**: the
+source layer itself, hidden, and two visible copies derived from it.
+
+```json
+{ "id": "p-1-L1", "name": "Sketch", "color_tag": "#2f6fb0", "opacity": 100,
+  "blend": "normal", "locked": false, "visible": false, "art": "art/p-1-L1.svg",
+  "x-upshot": { "split": { "visible": true, "vector": "p-1-L1-vector", "raster": "p-1-L1-raster" } } }
+
+{ "id": "p-1-L1-raster", "name": "Sketch_raster", "color_tag": "#2f6fb0", "opacity": 100,
+  "blend": "normal", "locked": false, "visible": true, "art": "art/p-1-L1-raster.svg",
+  "image": { "file": "images/p-1_p-1-L1_pencil.png", "w": 1360, "h": 400,
+             "transform": [0.5, 0, 0, 0.5, 60.0, 52.0] },
+  "x-upshot": { "derived_from": "p-1-L1", "role": "raster" } }
+
+{ "id": "p-1-L1-vector", "name": "Sketch_vector", "color_tag": "#2f6fb0", "opacity": 100,
+  "blend": "normal", "locked": false, "visible": true, "art": "art/p-1-L1-vector.svg",
+  "x-upshot": { "derived_from": "p-1-L1", "role": "vector" } }
+```
+
+- The **source** keeps its whole art (ink and pencil paths, with the
+  pencil attributes of "Pencil strokes") and every presentation key, but
+  its `visible` is forced to `false`. `x-upshot.split` records the
+  original visibility and the ids of the copies.
+- `<id>-vector` / `<name>_vector` holds the source's non-pencil strokes as
+  ordinary filled paths. It is omitted when the source has no such
+  strokes (then `split` has no `vector` key).
+- `<id>-raster` / `<name>_raster` is an image layer whose file
+  (`images/<panelID>_<layerID>_pencil.png`, RGBA PNG) is the writer's own
+  rendering of the pencil strokes alone, on a transparent ground, placed in
+  world by `image.transform` like any image layer.
+- Both copies carry the source's `color_tag`, `opacity`, `blend`, `blur`,
+  `locked` and `group`, and the source's ORIGINAL visibility. A
+  `layer_tracks` entry whose `name` matches the source is duplicated for
+  the two derived names so name-matched animation still applies; the
+  duplicates carry `x-upshot: { "derived_from": "<name>", "role": … }`.
+- **Stacking.** Inside one layer, ink and pencil strokes interleave freely
+  in draw order; two whole layers can only stack one above the other. The
+  writer places the raster copy above the vector copy when most pencil
+  strokes were drawn after the ink, otherwise below. Where a pencil and an
+  ink stroke overlap in the opposite order the copies differ from the
+  source at that spot. The hidden source keeps the exact interleaving and
+  is the layer Upshot edits.
+- **Readers need nothing new**: honouring `visible` already shows the two
+  copies and hides the source. Upshot's importer recognises
+  `derived_from` in a file Upshot wrote, drops the copies and the
+  duplicated tracks, and restores the source's visibility from `split`.
+  An archive without a vendor block in `project.json` (another writer's,
+  or a Toon Boom re-export) imports every layer as it is. Writers other
+  than Upshot should not produce derived layers.
 
 ### panels/\<id\>/camera.json
 
@@ -254,7 +341,7 @@ One SVG per layer, in world units. Upshot writes exactly this:
      sboardx:layer-id="p-1-L1"
      sboardx:layer-name="Layer 1"
      sboardx:panel-id="p-1"
-     sboardx:format-version="1.0">
+     sboardx:format-version="1.1">
   <rect x="-480" y="-270" width="960" height="540" fill="none"/>
   <g sboardx:blend="normal" sboardx:opacity="100"
      style="mix-blend-mode: normal; opacity: 1.00;">
@@ -275,7 +362,8 @@ One SVG per layer, in world units. Upshot writes exactly this:
 - Each stroke is one `<path>`: a closed outline filled with the stroke
   colour, `fill-rule="nonzero"`, `stroke="none"`. `d` uses absolute `M`, `C`
   and `Z` only (one subpath per outline loop; holes are carved by the
-  nonzero rule). `fill-opacity` carries alpha when it isn't 1.
+  nonzero rule). `fill-opacity` carries alpha when it isn't 1; it is the
+  stroke's own opacity for every stroke kind.
 - Coordinates are printed with shortest round-trip precision, so a reader
   parsing them with `strtod` gets the author's doubles back bit-exactly.
 
@@ -285,18 +373,94 @@ exist so Upshot can re-import its own files exactly:
 | Attribute | Meaning |
 |---|---|
 | `sboardx:z` on `<path>` | The stroke's index in the panel's draw order across all layers. Restores interleaving after a round trip. |
-| `sboardx:rgba` on `<path>` | `"r g b a"` doubles in 0–1 for colours not representable as 8-bit hex. |
-| `sboardx:stroke-type` | Always `boundary` (the path is an outline, not a centreline). |
+| `sboardx:rgba` on `<path>` (and on a gradient `<stop>`) | `"r g b a"` doubles in 0–1 for colours not representable as 8-bit hex. |
+| `sboardx:stroke-type` on `<path>` | `boundary` (the default when absent: the path is a filled outline, not a centreline) or `pencil` (*1.1*, see "Pencil strokes"). |
+| `sboardx:spine`, `sboardx:pencil`, `sboardx:grain-offset` on `<path>` | Upshot-private data of a `pencil` path (*1.1*). Opaque: the semantics are unpublished and may change without a version bump. Renderers ignore them and draw the path. |
+| `sboardx:blend` / `sboardx:opacity` on `<g>` | Plain copies of the layer's `blend` and `opacity` for a reader looking at one SVG alone. `layers.json` is authoritative. |
 | `sboardx:blur` on `<g>` | Same value as `layers.json` `blur`. |
-| Root `sboardx:layer-id` / `layer-name` / `panel-id` / `format-version` | Identification when the SVG is viewed alone. |
+| Root `sboardx:layer-id` / `layer-name` / `panel-id` / `format-version` | Identification when the SVG is viewed alone; `format-version` is the file's version string. |
+
+#### Pencil strokes (1.1)
+
+A `<path>` with `sboardx:stroke-type="pencil"` is a textured pencil stroke.
+The path itself is the stroke's **fallback outline**: a closed filled shape
+every renderer can draw, whose `fill-opacity` is the stroke's
+full-coverage alpha. The attributes `sboardx:spine`, `sboardx:pencil` and
+`sboardx:grain-offset` carry the data Upshot needs to re-edit the stroke;
+they are private to Upshot and a renderer must not depend on them. Upshot
+never relies on another renderer drawing the texture from them either: a
+layer holding pencil strokes is written as derived layers (see
+`layers.json`), and the derived raster copy is what readers show. A path
+whose `sboardx:stroke-type` is `pencil` but whose private attributes are
+missing or malformed is an ordinary filled outline.
+
+#### Gradient fills (1.1)
+
+A path may be filled with a linear or radial gradient instead of a flat
+colour. The gradient is defined in a `<defs>` element placed as the first
+child of the layer's `<g>` and referenced by `fill="url(#id)"`:
+
+```xml
+  <g sboardx:blend="normal" sboardx:opacity="100"
+     style="mix-blend-mode: normal; opacity: 1.00;">
+    <defs>
+      <linearGradient id="g12" gradientUnits="userSpaceOnUse"
+                      x1="0" y1="0" x2="1" y2="0"
+                      gradientTransform="matrix(180 0 0 180 -90 -40)">
+        <stop offset="0" stop-color="#ff5a1f"/>
+        <stop offset="1" stop-color="#1f5f8b" stop-opacity="0.5"/>
+      </linearGradient>
+      <radialGradient id="g13" gradientUnits="userSpaceOnUse"
+                      cx="0" cy="0" r="1"
+                      gradientTransform="matrix(120 0 0 60 40 20)">
+        <stop offset="0" stop-color="#ffffff"/>
+        <stop offset="1" stop-color="#1a334d"/>
+      </radialGradient>
+    </defs>
+    <path d="…" fill="url(#g12)" fill-rule="nonzero" stroke="none"
+          sboardx:z="12" sboardx:stroke-type="boundary"/>
+  </g>
+```
+
+- Upshot writes every gradient in **unit space**: a linear gradient runs
+  from `(0,0)` to `(1,0)`, a radial gradient is the unit circle centred on
+  `(0,0)`, and `gradientTransform` (a `matrix(a b c d tx ty)` in the
+  `image.transform` scalar layout) maps that space onto the world. One
+  affine therefore holds position, length, direction, ellipticity and
+  skew, and transforms with the stroke by a matrix product. Readers that
+  resolve SVG gradients natively (browsers) need nothing else.
+- Stops are sorted by `offset` (0–1). `stop-color` is `#rrggbb`;
+  `stop-opacity` carries the stop's alpha when it isn't 1; a
+  `sboardx:rgba` attribute on the stop carries the exact colour when it is
+  not representable in 8 bits. A gradient path carries no `fill-opacity`:
+  the stops carry the alpha. Spread is always pad (the SVG default;
+  `spreadMethod` is not written).
+- Ids are unique within the file (`g<z>` in Upshot's output). The `<defs>`
+  sits inside the `<g>` so a consumer that extracts only the layer group
+  keeps the definitions.
+- Upshot treats the first stop's colour as the stroke's flat fallback
+  colour (used for onion skinning and when a consumer cannot draw the
+  gradient). Pencil strokes are never gradient-filled.
 
 **Writing SVG for Upshot to read.** Upshot's importer is not a general SVG
 parser. It reads `<path>` elements anywhere in the file with absolute
 `M L Q C Z` commands (relative commands, arcs, `H`/`V` and transforms are
-not supported; such a path is skipped). Filled paths import as-is. A
-*stroked* path (`fill="none"`, `stroke`, `stroke-width`, round caps/joins)
-is outlined into a filled shape on import, so pencil-style centrelines are
-fine. Gradients, text, images and clip masks inside the art SVG are ignored.
+not supported; such a path is skipped). Filled paths import as-is;
+`fill-opacity` (and `stroke-opacity` on a stroked path) is honoured and
+becomes the stroke's own opacity, which Upshot keeps through recolouring
+and writes back as `fill-opacity`. A *stroked* path (`fill="none"`,
+`stroke`, `stroke-width`, round caps/joins) is outlined into a filled
+shape on import, so pencil-style centrelines are fine. Gradient fills
+(*1.1*) are read in these forms: `linearGradient` and `radialGradient`
+elements anywhere in the file, `gradientUnits` `objectBoundingBox` (the
+SVG default) or `userSpaceOnUse`, `gradientTransform` as a list of
+`matrix`, `translate`, `scale` and `rotate`, `x1 y1 x2 y2` / `cx cy r` as
+numbers or percentages, stops given as attributes or as
+`style="stop-color:…; stop-opacity:…"`, and one level of `href` /
+`xlink:href` stop inheritance. A gradient with a single stop imports as
+that flat colour; a `url(#…)` that resolves to nothing imports black.
+Focal points (`fx`, `fy`), `spreadMethod` other than pad, pattern fills,
+text, images and clip masks inside the art SVG are ignored.
 
 ### audio/clips.json
 
@@ -354,7 +518,11 @@ still complete. Writers should omit them at their default value.
 | `sequence.json` scene | `layer_tracks` | `[]` |
 | `clips.json` clip | `track` | `0` |
 | `clips.json` | `tracks` | one unmuted track |
+| `sequence.json` | `sequences` | none |
 | `sequence.json` | `transitions` | `[]` |
+| art SVG `<path>` | `sboardx:stroke-type` | `boundary` |
+| art SVG `<path>` | `fill="url(#…)"` | a flat `fill` colour |
+| `project.json`, `panel.json` | `x-the-storyboard-app` | legacy alias of `x-upshot`, read by Upshot |
 | any | `x-*` | ignored |
 | art SVG | `sboardx:*` | ignored |
 
@@ -373,16 +541,17 @@ still complete. Writers should omit them at their default value.
 
 ## Conformance
 
-**Minimum reader**: STORE-only zip; `project.json` version check;
-`sequence.json` panel order and scenes; per panel `panel.json`,
-`layers.json` and the art SVGs (render bottom to top, honour `visible`,
-`opacity`, `blend`, `blur`, and `image` layers). Audio and camera are
-optional to support.
+**Minimum reader**: STORE-only zip; `project.json` version check (`1.0`
+or `1.1`; a 1.1 reader accepts 1.0 files); `sequence.json` panel order and
+scenes; per panel `panel.json` (show `code` verbatim), `layers.json` and
+the art SVGs (render bottom to top, honour `visible`, `opacity`, `blend`,
+`blur`, `image` layers, and `fill-opacity` / gradient fills on paths).
+Audio, camera and sequences are optional to support.
 
 **Minimum writer**: everything in "Entries" that isn't marked optional,
-STORE-only, `sboardx: "1.0"`, art as filled `M C Z` (or `M L Q C Z`) paths
+STORE-only, `sboardx: "1.1"`, art as filled `M C Z` (or `M L Q C Z`) paths
 in world coordinates. Skip the `sboardx:` attributes unless you carry stroke
-order across a round trip.
+order across a round trip. Never write derived layers.
 
 **Upshot's guarantee**: for a file Upshot wrote, import is bit-exact
 (export → import → export yields identical bytes). Files from other writers

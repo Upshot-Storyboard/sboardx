@@ -489,15 +489,20 @@ function layerSvg(env, drawing, layerId, layerName, panelId) {
                      " layer '" + layerName + "': " + e);
     }
     var body = "";
+    // Gradient definitions (sboardx 1.1): collected while writing the
+    // drawables and emitted as the FIRST child of the <g>, where a reader
+    // that extracts only the layer group keeps them (SPEC "Gradient fills").
+    var defs = [];
     if (data && data.arts) {
         var arts = data.arts.slice().sort(function (a, b) { return a.art - b.art; });
         for (var a = 0; a < arts.length; a++) {
             var layers = arts[a].layers || [];
             for (var l = 0; l < layers.length; l++) {
-                body += drawablesSvg(env, layers[l], data.colors, usedTexture);
+                body += drawablesSvg(env, layers[l], data.colors, usedTexture, defs);
             }
         }
     }
+    if (defs.length) body = '    <defs>\n' + defs.join("") + '    </defs>\n' + body;
     var xs = fmtNum(-env.frameW / 2), ys = fmtNum(-env.frameH / 2);
     var ws = fmtNum(env.frameW), hs = fmtNum(env.frameH);
     var xml = env.common.xmlEscape;
@@ -508,7 +513,8 @@ function layerSvg(env, drawing, layerId, layerName, panelId) {
               ' width="' + ws + '" height="' + hs + '"\n' +
               '     sboardx:layer-id="' + xml(layerId) + '"\n' +
               '     sboardx:layer-name="' + xml(layerName) + '"\n' +
-              '     sboardx:panel-id="' + xml(panelId) + '">\n' +
+              '     sboardx:panel-id="' + xml(panelId) + '"\n' +
+              '     sboardx:format-version="1.1">\n' +
               '  <g sboardx:blend="normal" sboardx:opacity="100">\n' +
               body +
               '  </g>\n' +
@@ -516,7 +522,7 @@ function layerSvg(env, drawing, layerId, layerName, panelId) {
     return { svg: svg, usedTexture: usedTexture.value };
 }
 
-function drawablesSvg(env, vectorLayer, colors, usedTexture) {
+function drawablesSvg(env, vectorLayer, colors, usedTexture, defs) {
     var body = "";
     var i, col, dAttr;
     var contours = vectorLayer.contours || [];
@@ -531,9 +537,17 @@ function drawablesSvg(env, vectorLayer, colors, usedTexture) {
             }
         }
         col = lookupColor(colors, contour.colorId, usedTexture);
-        body += '  <path d="' + dAttr + '" fill="' + col.hex + '"' +
-                (col.alpha < 1 ? ' fill-opacity="' + fmtNum(col.alpha) + '"' : '') +
-                ' stroke="none"/>\n';
+        var gradientDef = col.gradient ? gradientDefSvg(env, col.gradient, contourShaderMatrix(vectorLayer, contour)) : null;
+        if (gradientDef) {
+            defs.push(gradientDef.xml);
+            body += '  <path d="' + dAttr + '" fill="url(#' + gradientDef.id + ')" stroke="none"/>\n';
+        } else {
+            // A gradient without a readable matrix flattens to its first
+            // stop (documented degradation).
+            body += '  <path d="' + dAttr + '" fill="' + col.hex + '"' +
+                    (col.alpha < 1 ? ' fill-opacity="' + fmtNum(col.alpha) + '"' : '') +
+                    ' stroke="none"/>\n';
+        }
     }
     var strokes = vectorLayer.strokes || [];
     for (i = 0; i < strokes.length; i++) {
@@ -612,7 +626,88 @@ function lookupColor(colors, colorId, usedTexture) {
     var c = colors && colors[colorId] ? colors[colorId] : null;
     if (!c) return { hex: "#000000", alpha: 1 };
     if (c.isTexture) usedTexture.value = true;
+    var stops = gradientStopsOf(c);
+    if (stops) {
+        // sboardx 1.1 gradient fill: hex/alpha are the FIRST stop (the flat
+        // fallback), the stops ride along for <defs>.
+        return { hex: colorHex(stops[0]), alpha: stops[0].a / 255.0,
+                 gradient: { type: gradientTypeOf(c), stops: stops } };
+    }
     return { hex: colorHex(c), alpha: (c.a === undefined ? 255 : c.a) / 255.0 };
+}
+
+// The gradient stops of a Drawing.query.getData colour, as 8-bit {r,g,b,a}
+// + t (0..1), or null for a solid. PROBE ITEM: the field the query exposes
+// for a gradient palette colour is unprobed — the candidates read here are
+// `colorData` as an array of stops (Harmony's gradient colorData shape),
+// `gradient` and `stops`; anything else reads as a solid.
+function gradientStopsOf(c) {
+    var raw = null;
+    if (c.colorData && typeof c.colorData.length === "number" && c.colorData.length >= 2) raw = c.colorData;
+    else if (c.gradient && typeof c.gradient.length === "number" && c.gradient.length >= 2) raw = c.gradient;
+    else if (c.stops && typeof c.stops.length === "number" && c.stops.length >= 2) raw = c.stops;
+    if (!raw) return null;
+    var stops = [];
+    for (var i = 0; i < raw.length; i++) {
+        var s = raw[i];
+        if (!s || typeof s.r !== "number") return null;
+        var scale = (s.r > 1 || s.g > 1 || s.b > 1) ? 1 : 255;   // 8-bit or 0..1 channels
+        stops.push({ r: s.r * scale, g: s.g * scale, b: s.b * scale,
+                     a: (typeof s.a === "number") ? s.a * scale : 255,
+                     t: (typeof s.t === "number") ? s.t : i / (raw.length - 1) });
+    }
+    stops.sort(function (x, y) { return x.t - y.t; });
+    return stops;
+}
+
+function gradientTypeOf(c) {
+    try {
+        var CT = PaletteObjectManager.Constants.ColorType;
+        if (CT && CT.RADIAL_GRADIENT !== undefined && c.colorType === CT.RADIAL_GRADIENT) return "radial";
+        if (CT && CT.LINEAR_GRADIENT !== undefined && c.colorType === CT.LINEAR_GRADIENT) return "linear";
+    } catch (e) {}
+    var t = String(c.gradientType || c.type || "").toLowerCase();
+    return t.indexOf("radial") >= 0 ? "radial" : "linear";
+}
+
+// The shader matrix placing a gradient colour on a contour, in drawing
+// units ({ox, oy, xx, xy, yx, yy}: x = xx·u + yx·v + ox, y = xy·u + yy·v + oy —
+// the texture matrix convention). PROBE ITEM: where Drawing.query.getData
+// exposes it; the candidates read here are `contour.matrix` and the layer's
+// `shaders[contour.shaderIndex].matrix`. null → the contour flattens.
+function contourShaderMatrix(vectorLayer, contour) {
+    var m = contour.matrix || null;
+    if (!m && vectorLayer.shaders && typeof contour.shaderIndex === "number") {
+        var sh = vectorLayer.shaders[contour.shaderIndex];
+        if (sh && sh.matrix) m = sh.matrix;
+    }
+    if (!m && vectorLayer.shaders && vectorLayer.shaders.length === 1 && vectorLayer.shaders[0].matrix) {
+        m = vectorLayer.shaders[0].matrix;
+    }
+    if (!m || typeof m.xx !== "number") return null;
+    return m;
+}
+
+// One <linearGradient>/<radialGradient> in SPEC.md's unit-space form: the
+// shader matrix (drawing units, y up) becomes the unit->world
+// gradientTransform through svgPathData's own mapping (x·s, −y·s).
+function gradientDefSvg(env, gradient, m) {
+    if (!m) return null;
+    var s = env.worldPerDrawing;
+    var aff = [m.xx * s, -m.xy * s, m.yx * s, -m.yy * s, m.ox * s, -m.oy * s];
+    env.gradientSeq = (env.gradientSeq || 0) + 1;
+    var id = "tbg" + env.gradientSeq;
+    var geom = gradient.type === "radial" ? ' cx="0" cy="0" r="1"' : ' x1="0" y1="0" x2="1" y2="0"';
+    var xml = '      <' + (gradient.type === "radial" ? "radialGradient" : "linearGradient") +
+              ' id="' + id + '" gradientUnits="userSpaceOnUse"' + geom +
+              ' gradientTransform="matrix(' + aff.map(fmtNum).join(" ") + ')">\n';
+    for (var i = 0; i < gradient.stops.length; i++) {
+        var st = gradient.stops[i];
+        xml += '        <stop offset="' + fmtNum(st.t) + '" stop-color="' + colorHex(st) + '"' +
+               (st.a < 255 ? ' stop-opacity="' + fmtNum(st.a / 255) + '"' : '') + '/>\n';
+    }
+    xml += '      </' + (gradient.type === "radial" ? "radialGradient" : "linearGradient") + '>\n';
+    return { id: id, xml: xml };
 }
 
 function panelCaptionText(env, captionName, panelId) {
@@ -1020,7 +1115,7 @@ function projectDisplayName() {
 
 function writeProjectJson(env) {
     env.common.writeTextFile(env.stagingDir + "/project.json", JSON.stringify({
-        sboardx: "1.0",
+        sboardx: "1.1",
         app: "Toon Boom Storyboard Pro (TB_ExportSboardx)",
         created_at: env.nowIso,
         modified_at: env.nowIso,

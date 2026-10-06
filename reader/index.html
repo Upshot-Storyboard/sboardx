@@ -402,16 +402,19 @@ async function loadFile(file) {
   S.project  = JSON.parse(await zip.file('project.json').async('string'));
   S.sequence = JSON.parse(await zip.file('sequence.json').async('string'));
 
-  // sboardx 1.0 (SPEC.md). The sboardx:* SVG attributes are render-neutral
-  // here: paths are DOM-imported verbatim, fill-opacity renders natively,
-  // and the attributes are simply ignored. The optional audio track keys
-  // (per-clip `track`, root `tracks` mute list in audio/clips.json) are
-  // honored: one timeline row per track, muted tracks dimmed and silenced.
-  // The optional per-layer `blur` key (layers.json; Gaussian sigma in world
-  // units) is applied in compositeSVG through an SVG <filter>.
-  if (S.project.sboardx !== '1.0') {
+  // sboardx 1.0 and 1.1 (SPEC.md). The sboardx:* SVG attributes are
+  // render-neutral here: paths are DOM-imported verbatim, fill-opacity and
+  // gradient fills render natively, and the attributes are simply ignored
+  // (a 1.1 pencil layer arrives as a hidden source plus visible derived
+  // copies, so honouring `visible` is all the pencil needs). The optional
+  // audio track keys (per-clip `track`, root `tracks` mute list in
+  // audio/clips.json) are honored: one timeline row per track, muted tracks
+  // dimmed and silenced. The optional per-layer `blur` key (layers.json;
+  // Gaussian sigma in world units) is applied in compositeSVG through an
+  // SVG <filter>.
+  if (S.project.sboardx !== '1.0' && S.project.sboardx !== '1.1') {
     alert(`This archive uses sboardx format "${S.project.sboardx || 'unknown'}"; ` +
-          'this reader requires 1.0.');
+          'this reader requires 1.0 or 1.1.');
     return;
   }
 
@@ -538,18 +541,20 @@ function buildScenes() {
     t += panel.meta.dur;
   }
 
-  // Display codes: "{sceneNumber}-{letter}", letter restarting per scene —
-  // derived like the app derives them. Files without scenes keep their
-  // stored codes.
+  // Display codes: panel.json `code` verbatim (SPEC: "shown verbatim by
+  // readers" — the app resolves names like `10-1` or `CHASE-Crash` and
+  // writes the result). Only a panel with no code falls back to a derived
+  // "{sceneNumber}-{letter}", letter restarting per scene.
   const counters = new Map();
   S.panels.forEach(p => {
+    if (p.meta.code) { p.dispCode = p.meta.code; return; }
     if (p.scene && !p.scene.synthetic) {
       const n = (counters.get(p.scene) || 0) + 1;
       counters.set(p.scene, n);
       const letter = String.fromCharCode(65 + ((n - 1) % 26));
       p.dispCode = `${S.scenes.indexOf(p.scene) + 1}-${letter}`;
     } else {
-      p.dispCode = p.meta.code;
+      p.dispCode = '';
     }
   });
 }
@@ -869,6 +874,51 @@ function buildTimeline() {
 // ── SVG composite ─────────────────────────────────────────────────────────────
 
 let blurFilterSeq = 0;   // unique <filter> ids across all composites on the page
+let gradientSeq = 0;     // unique gradient ids across all composites on the page
+
+// layers.json blend -> CSS mix-blend-mode (SPEC: `add` is CSS plus-lighter).
+// '' for normal so no style is written.
+function cssBlend(blend) {
+  if (!blend || blend === 'normal') return '';
+  return blend === 'add' ? 'plus-lighter' : blend;
+}
+
+// layers.json is the authoritative opacity/blend (SPEC "layers.json is
+// authoritative if they disagree"); the art <g>'s baked style is only the
+// fallback for a producer that omits the keys (Toon Boom's exporter bakes
+// no style at all, so without this its layer opacity was lost).
+function applyLayerStyle(el, layer) {
+  if (typeof layer.opacity === 'number') el.style.opacity = layer.opacity === 100 ? '' : String(layer.opacity / 100);
+  if (typeof layer.blend === 'string') el.style.mixBlendMode = cssBlend(layer.blend);
+}
+
+// Every panel's SVG is composited into the ONE HTML document (thumbnails
+// and the stage), where element ids are global: gradient ids such as `g0`
+// repeat across layers and panels. Rename each gradient definition and
+// every `url(#id)` reference to it with a page-unique suffix before import.
+function uniquifyGradientIds(doc) {
+  const grads = doc.querySelectorAll('linearGradient, radialGradient');
+  if (!grads.length) return;
+  const renames = new Map();
+  grads.forEach(g => {
+    const id = g.getAttribute('id');
+    if (!id) return;
+    const fresh = `${id}-sbx${++gradientSeq}`;
+    renames.set(id, fresh);
+    g.setAttribute('id', fresh);
+  });
+  const fixRef = (el, attr) => {
+    const v = el.getAttribute(attr);
+    if (!v) return;
+    const m = /^url\(#([^)]+)\)/.exec(v.trim());
+    if (m && renames.has(m[1])) el.setAttribute(attr, `url(#${renames.get(m[1])})`);
+    else if (attr !== 'fill' && attr !== 'stroke' && v.startsWith('#') && renames.has(v.slice(1)))
+      el.setAttribute(attr, `#${renames.get(v.slice(1))}`);   // href between gradients
+  };
+  doc.querySelectorAll('*').forEach(el => {
+    fixRef(el, 'fill'); fixRef(el, 'stroke'); fixRef(el, 'href'); fixRef(el, 'xlink:href');
+  });
+}
 
 function compositeSVG(panel, mini = false) {
   const w = S.project.canvas.width;
@@ -943,27 +993,28 @@ function compositeSVG(panel, mini = false) {
       img.setAttribute('height', String(layer.image.h));
       img.setAttribute('preserveAspectRatio', 'none');
       img.setAttribute('transform', `matrix(${a} ${b} ${c} ${d} ${tx} ${ty})`);
-      // Vector layers carry opacity/blend baked into their art <g> style; a
-      // raster layer's art SVG is skipped, so its styling comes from
-      // layers.json here.
-      let style = '';
-      if (typeof layer.opacity === 'number' && layer.opacity !== 100)
-        style += `opacity: ${layer.opacity / 100}; `;
-      if (layer.blend && layer.blend !== 'normal')
-        style += `mix-blend-mode: ${layer.blend}; `;
-      if (blurUrl) style += `filter: ${blurUrl}; `;
-      if (style) img.setAttribute('style', style.trim());
+      // A raster layer's art SVG is skipped, so its styling comes from
+      // layers.json here (the same authoritative source vector layers use).
+      applyLayerStyle(img, layer);
+      if (blurUrl) img.style.filter = blurUrl;
       attach(img, layer);
       continue;
     }
     const svgStr = panel.svgText.get(layer.id);
     if (!svgStr) continue;
     const doc = parser.parseFromString(svgStr, 'image/svg+xml');
+    uniquifyGradientIds(doc);
+    // Gradient definitions a third-party writer put outside the layer <g>
+    // (Upshot puts its <defs> inside the <g>, so they ride along below).
+    const rootDefs = Array.from(doc.documentElement.children)
+      .filter(child => child.tagName === 'defs');
     const g = doc.querySelector('g');
     if (g) {
       const node = document.importNode(g, true);
-      // Replace the baked CSS blur (if any) with the <filter> reference;
-      // opacity and blend in the same style attribute stay as they are.
+      for (const d of rootDefs) node.insertBefore(document.importNode(d, true), node.firstChild);
+      // layers.json opacity/blend override the baked style; replace the
+      // baked CSS blur (if any) with the <filter> reference.
+      applyLayerStyle(node, layer);
       if (blurUrl) node.style.filter = blurUrl;
       else if (node.style && node.style.filter) node.style.filter = '';
       attach(node, layer);
@@ -972,6 +1023,7 @@ function compositeSVG(panel, mini = false) {
       // it grew the wrapper) emit drawables directly under <svg> with no
       // <g> — import them in document order instead of dropping the layer.
       const wrap = document.createElementNS(NS, 'g');
+      applyLayerStyle(wrap, layer);
       if (blurUrl) wrap.style.filter = blurUrl;
       for (const child of Array.from(doc.documentElement.children)) {
         if (child.tagName === 'parsererror') continue;
