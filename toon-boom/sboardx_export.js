@@ -118,7 +118,8 @@ function makeExportEnv(common, log, zipPath) {
         counts: { scenes: 0, panels: 0, layers: 0, rasterLayers: 0,
                   emptyLayers: 0, camScenes: 0, audioClips: 0, audioTracks: 0,
                   groups: 0, animatedLayers: 0, nestedGroups: 0,
-                  sequences: 0, sourceIds: 0 }
+                  sequences: 0, sourceIds: 0,
+                  gradientFills: 0 }
     };
 }
 
@@ -372,8 +373,7 @@ function readLayerKeys(env, panelId, li, panelFrames) {
     if (frames.length === 0) return [];
     frames.sort(function (a, b) { return a - b; });
 
-    var opacity = 1;
-    try { opacity = env.lm.layerOpacity(panelId, li) / 100; } catch (e2) {}
+    var opacity = layerOpacityOf(env, panelId, li) / 100;
 
     var out = [];
     for (i = 0; i < frames.length; i++) {
@@ -425,6 +425,64 @@ function writePanelJson(env, panelDir, sceneName, panelId, outId) {
     env.common.writeTextFile(panelDir + "/panel.json", JSON.stringify(panelObj));
 }
 
+// Layer opacity (0..100). layerOpacity() needs a GUI session; in -batch
+// the saved value is read from the project's .sboard file instead.
+function layerOpacityOf(env, panelId, li) {
+    try {
+        var v = env.lm.layerOpacity(panelId, li);
+        if (typeof v === "number" && isFinite(v)) return v;
+    } catch (e) {
+        if (!env.layerOpacityFromFile) {
+            env.layerOpacityFromFile = true;
+            env.log.trace("layer opacity read from the project file (no session): " + e);
+        }
+    }
+    var name = "";
+    try { name = String(env.lm.layerName(panelId, li)); } catch (e2) {}
+    var text = sceneFileText(env);
+    if (!text || !name) return 100;
+    return sceneFileLayerOpacity(text, panelId, name);
+}
+
+function sceneFileText(env) {
+    if (env.sceneFileText !== undefined) return env.sceneFileText;
+    env.sceneFileText = null;
+    try {
+        var dir = String(project.currentProjectPath()).replace(/\\/g, "/").replace(/\/+$/, "");
+        var names = new Dir(dir).entryList("*.sboard");
+        if (names && names.length > 0) env.sceneFileText = env.common.readTextFile(dir + "/" + names[0]);
+        if (!env.sceneFileText) env.log.trace("layer opacity: no readable .sboard in " + dir);
+    } catch (e) {
+        env.log.trace("layer opacity: project file unavailable (" + e + ")");
+    }
+    return env.sceneFileText;
+}
+
+// The <opacity val> of the READ module named `layerName` inside the panel's
+// <scene id=…> element (its name is "panel", "panel (2)", …); 100 if absent.
+function sceneFileLayerOpacity(text, panelId, layerName) {
+    var start = -1, from = 0;
+    while (start < 0) {
+        var hit = text.indexOf(' id="' + panelId + '"', from);
+        if (hit < 0) return 100;
+        var open = text.lastIndexOf("<", hit);
+        if (open >= 0 && text.substring(open, open + 7) === "<scene " &&
+            text.indexOf(">", open) > hit) start = open;
+        from = hit + 1;
+    }
+    var end = text.indexOf("</scene>", start);
+    if (end < 0) end = text.length;
+    var block = text.substring(start, end);
+    var m = block.indexOf('<module type="READ" name="' + layerName + '"');
+    if (m < 0) return 100;
+    var next = block.indexOf("<module ", m + 8);
+    var mod = block.substring(m, next < 0 ? block.length : next);
+    var r = /<opacity val="([0-9.]+)"/.exec(mod);
+    if (!r) return 100;
+    var v = parseFloat(r[1]);
+    return isFinite(v) ? Math.max(0, Math.min(100, v)) : 100;
+}
+
 function exportLayer(env, panelDir, panelId, outId, li, rasterJobs) {
     var layerName = String(env.lm.layerName(panelId, li));
     var layerId = "layer" + li;
@@ -453,8 +511,7 @@ function exportLayer(env, panelDir, panelId, outId, li, rasterJobs) {
 
     var locked = false;
     try { locked = env.lm.getLayerLock(panelId, li) === true; } catch (e3) {}
-    var opacity = 100;
-    try { opacity = env.lm.layerOpacity(panelId, li); } catch (e4) {}
+    var opacity = layerOpacityOf(env, panelId, li);
     var visible = true;
     try { visible = env.lm.layerVisibility(panelId, li) !== false; } catch (e5) {}
 
@@ -489,10 +546,7 @@ function layerSvg(env, drawing, layerId, layerName, panelId) {
                      " layer '" + layerName + "': " + e);
     }
     var body = "";
-    // Gradient definitions (sboardx 1.1): collected while writing the
-    // drawables and emitted as the FIRST child of the <g>, where a reader
-    // that extracts only the layer group keeps them (SPEC "Gradient fills").
-    var defs = [];
+    var defs = [];   // gradient definitions, emitted first inside the <g>
     if (data && data.arts) {
         var arts = data.arts.slice().sort(function (a, b) { return a.art - b.art; });
         for (var a = 0; a < arts.length; a++) {
@@ -537,13 +591,16 @@ function drawablesSvg(env, vectorLayer, colors, usedTexture, defs) {
             }
         }
         col = lookupColor(colors, contour.colorId, usedTexture);
-        var gradientDef = col.gradient ? gradientDefSvg(env, col.gradient, contourShaderMatrix(vectorLayer, contour)) : null;
-        if (gradientDef) {
+        if (col.gradient) {
+            // Placed by the shape's matrix; fitted to its box when absent.
+            var m = contourShaderMatrix(contour);
+            var aff = m ? affineFromShaderMatrix(env, m)
+                        : fitGradientAffine(col.gradient.type, contourWorldBounds(env, contour));
+            var gradientDef = gradientDefSvg(env, col.gradient, aff);
+            env.counts.gradientFills++;
             defs.push(gradientDef.xml);
             body += '  <path d="' + dAttr + '" fill="url(#' + gradientDef.id + ')" stroke="none"/>\n';
         } else {
-            // A gradient without a readable matrix flattens to its first
-            // stop (documented degradation).
             body += '  <path d="' + dAttr + '" fill="' + col.hex + '"' +
                     (col.alpha < 1 ? ' fill-opacity="' + fmtNum(col.alpha) + '"' : '') +
                     ' stroke="none"/>\n';
@@ -555,6 +612,7 @@ function drawablesSvg(env, vectorLayer, colors, usedTexture, defs) {
         if (st.invisible) continue;
         dAttr = svgPathData(env, st.path, st.closed === true);
         if (!dAttr) continue;
+        // A gradient on a pencil line flattens to its first stop.
         col = lookupColor(colors, st.colorId, usedTexture);
         var w = pencilWidthDrawing(st, vectorLayer.thicknessPaths);
         body += '  <path d="' + dAttr + '" fill="none" stroke="' + col.hex + '"' +
@@ -622,79 +680,80 @@ function colorHex(c) {
     return "#" + h(c.r) + h(c.g) + h(c.b);
 }
 
+// A drawable's paint from the drawing's colour table: {hex, alpha}, plus
+// `gradient: {type, stops}` for a gradient colour (`gradient` + `gradientData`).
 function lookupColor(colors, colorId, usedTexture) {
     var c = colors && colors[colorId] ? colors[colorId] : null;
     if (!c) return { hex: "#000000", alpha: 1 };
     if (c.isTexture) usedTexture.value = true;
     var stops = gradientStopsOf(c);
     if (stops) {
-        // sboardx 1.1 gradient fill: hex/alpha are the FIRST stop (the flat
-        // fallback), the stops ride along for <defs>.
         return { hex: colorHex(stops[0]), alpha: stops[0].a / 255.0,
-                 gradient: { type: gradientTypeOf(c), stops: stops } };
+                 gradient: { type: c.gradient === "radial" ? "radial" : "linear", stops: stops } };
     }
-    return { hex: colorHex(c), alpha: (c.a === undefined ? 255 : c.a) / 255.0 };
+    if (typeof c.r !== "number") return { hex: "#000000", alpha: 1 };
+    var a = (typeof c.a === "number") ? c.a : 255;
+    return { hex: colorHex(c), alpha: Math.max(0, Math.min(1, a / 255.0)) };
 }
 
-// The gradient stops of a Drawing.query.getData colour, as 8-bit {r,g,b,a}
-// + t (0..1), or null for a solid. PROBE ITEM: the field the query exposes
-// for a gradient palette colour is unprobed — the candidates read here are
-// `colorData` as an array of stops (Harmony's gradient colorData shape),
-// `gradient` and `stops`; anything else reads as a solid.
+// Gradient stops as 8-bit {r,g,b,a} + t (0..1), sorted; null for a solid.
 function gradientStopsOf(c) {
-    var raw = null;
-    if (c.colorData && typeof c.colorData.length === "number" && c.colorData.length >= 2) raw = c.colorData;
-    else if (c.gradient && typeof c.gradient.length === "number" && c.gradient.length >= 2) raw = c.gradient;
-    else if (c.stops && typeof c.stops.length === "number" && c.stops.length >= 2) raw = c.stops;
-    if (!raw) return null;
+    var raw = c.gradientData;
+    if (!raw || typeof raw.length !== "number" || raw.length < 2) return null;
     var stops = [];
     for (var i = 0; i < raw.length; i++) {
-        var s = raw[i];
-        if (!s || typeof s.r !== "number") return null;
-        var scale = (s.r > 1 || s.g > 1 || s.b > 1) ? 1 : 255;   // 8-bit or 0..1 channels
-        stops.push({ r: s.r * scale, g: s.g * scale, b: s.b * scale,
-                     a: (typeof s.a === "number") ? s.a * scale : 255,
-                     t: (typeof s.t === "number") ? s.t : i / (raw.length - 1) });
+        var st = raw[i];
+        if (!st || typeof st.r !== "number") return null;
+        var t = (typeof st.percent === "number") ? st.percent : i / (raw.length - 1);
+        stops.push({ r: st.r, g: st.g, b: st.b,
+                     a: (typeof st.a === "number") ? st.a : 255,
+                     t: Math.max(0, Math.min(1, t)) });
     }
     stops.sort(function (x, y) { return x.t - y.t; });
     return stops;
 }
 
-function gradientTypeOf(c) {
-    try {
-        var CT = PaletteObjectManager.Constants.ColorType;
-        if (CT && CT.RADIAL_GRADIENT !== undefined && c.colorType === CT.RADIAL_GRADIENT) return "radial";
-        if (CT && CT.LINEAR_GRADIENT !== undefined && c.colorType === CT.LINEAR_GRADIENT) return "linear";
-    } catch (e) {}
-    var t = String(c.gradientType || c.type || "").toLowerCase();
-    return t.indexOf("radial") >= 0 ? "radial" : "linear";
+// The contour's shader matrix {ox, oy, xx, xy, yx, yy} (drawing units): the
+// unit x axis is the gradient, matching the SVG form written below.
+function contourShaderMatrix(contour) {
+    var m = contour.matrix;
+    return (m && typeof m.xx === "number") ? m : null;
 }
 
-// The shader matrix placing a gradient colour on a contour, in drawing
-// units ({ox, oy, xx, xy, yx, yy}: x = xx·u + yx·v + ox, y = xy·u + yy·v + oy —
-// the texture matrix convention). PROBE ITEM: where Drawing.query.getData
-// exposes it; the candidates read here are `contour.matrix` and the layer's
-// `shaders[contour.shaderIndex].matrix`. null → the contour flattens.
-function contourShaderMatrix(vectorLayer, contour) {
-    var m = contour.matrix || null;
-    if (!m && vectorLayer.shaders && typeof contour.shaderIndex === "number") {
-        var sh = vectorLayer.shaders[contour.shaderIndex];
-        if (sh && sh.matrix) m = sh.matrix;
-    }
-    if (!m && vectorLayer.shaders && vectorLayer.shaders.length === 1 && vectorLayer.shaders[0].matrix) {
-        m = vectorLayer.shaders[0].matrix;
-    }
-    if (!m || typeof m.xx !== "number") return null;
-    return m;
-}
-
-// One <linearGradient>/<radialGradient> in SPEC.md's unit-space form: the
-// shader matrix (drawing units, y up) becomes the unit->world
-// gradientTransform through svgPathData's own mapping (x·s, −y·s).
-function gradientDefSvg(env, gradient, m) {
-    if (!m) return null;
+// Shader matrix (drawing units, y up) -> unit->world affine.
+function affineFromShaderMatrix(env, m) {
     var s = env.worldPerDrawing;
-    var aff = [m.xx * s, -m.xy * s, m.yx * s, -m.yy * s, m.ox * s, -m.oy * s];
+    return [m.xx * s, -m.xy * s, m.yx * s, -m.yy * s, m.ox * s, -m.oy * s];
+}
+
+// World-unit bounds of a contour; null for an empty path.
+function contourWorldBounds(env, contour) {
+    var s = env.worldPerDrawing;
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    var paths = [contour.path].concat(contour.holes || []);
+    for (var i = 0; i < paths.length; i++) {
+        var pts = paths[i] || [];
+        for (var j = 0; j < pts.length; j++) {
+            var x = pts[j].x * s, y = -pts[j].y * s;
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+    }
+    return isFinite(minX) ? { minX: minX, minY: minY, maxX: maxX, maxY: maxY } : null;
+}
+
+// Upshot's auto-fit rule at 0°: linear left -> right across the box, radial
+// on the inscribed ellipse.
+function fitGradientAffine(type, bb) {
+    if (!bb) return [1, 0, 0, 1, 0, 0];
+    var w = Math.max(bb.maxX - bb.minX, 1e-6), h = Math.max(bb.maxY - bb.minY, 1e-6);
+    var cx = (bb.minX + bb.maxX) / 2, cy = (bb.minY + bb.maxY) / 2;
+    if (type === "radial") return [w / 2, 0, 0, h / 2, cx, cy];
+    return [w, 0, 0, w, bb.minX, cy];
+}
+
+// A <linearGradient>/<radialGradient> in SPEC.md's unit-space form.
+function gradientDefSvg(env, gradient, aff) {
     env.gradientSeq = (env.gradientSeq || 0) + 1;
     var id = "tbg" + env.gradientSeq;
     var geom = gradient.type === "radial" ? ' cx="0" cy="0" r="1"' : ' x1="0" y1="0" x2="1" y2="0"';
@@ -1188,7 +1247,9 @@ function exportSummary(env) {
                    " layer/group track(s). Opacity keyframes are not readable " +
                    "from Storyboard Pro; layers export with their constant opacity.";
     }
-    summary += "\n\nGradients are approximated by their solid base color.";
+    if (c.gradientFills > 0) {
+        summary += "\n\n" + c.gradientFills + " gradient fill(s) exported as SVG gradients.";
+    }
     if (env.log.warnings.length > 0) {
         summary += "\n\nWarnings:\n- " + env.log.warnings.join("\n- ");
     }

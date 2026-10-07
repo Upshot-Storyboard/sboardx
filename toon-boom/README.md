@@ -69,10 +69,12 @@ innermost); layer keyframes come out as `layer_tracks` keyed by the layer's
 or group's name, one track per scene — a layer merely moved with the Layer
 Transform tool exports as a one-keyframe (static) pose. Storyboard Pro
 turns spaces and punctuation in layer names into `_` (`Main BG` becomes
-`Main_BG`); tracks follow the sanitised name. Colour opacity exports as
-`fill-opacity` / `stroke-opacity`; a gradient fill exports as an SVG
-gradient when Storyboard Pro exposes the colour's stops and the shape's
-gradient matrix, otherwise it flattens to its first stop. Blur is lost
+`Main_BG`); tracks follow the sanitised name. A translucent colour exports
+as `fill-opacity` / `stroke-opacity`; a gradient colour as an SVG gradient
+placed by the shape's matrix (a gradient on a pencil line flattens to its
+first stop). A brush stroke drawn with the brush's Opacity below 100 % is
+a textured stroke in Storyboard Pro and exports opaque (see the app
+repo's TECH_DEBT.md). Blur is lost
 (already baked into pixels on import), audio gain and opacity keyframes
 aren't available from Storyboard Pro so clips export at the app's default
 and layers at their constant opacity.
@@ -85,5 +87,6 @@ StoryboardPro -scene p.sboard -batch -compile TB_ExportSboardx.js -script "TB_Ex
 ```
 
 Audio import needs a GUI session (Toon Boom limitation); in batch it falls
-back to placing whole files without trims. Image layers on scenes with a
-camera move also skip in batch.
+back to placing whole files without trims. In batch, layer opacity is read
+from the saved `.sboard` file, and image layers on scenes with a camera
+move skip.
