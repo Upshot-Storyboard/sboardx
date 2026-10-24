@@ -428,7 +428,21 @@ async function loadFile(file) {
     for (const layer of layers.layers) {
       const path = `panels/${id}/${layer.art}`;
       const entry = zip.file(path);
-      if (entry) svgText.set(layer.id, await entry.async('string'));
+      if (entry) {
+        const text = await entry.async('string');
+        svgText.set(layer.id, text);
+        // Textured strokes (1.1): a <pattern><image href="../../../images/…">
+        // names an atlas entry; read it once into a blob URL like a raster
+        // layer's image (the href is relative to panels/<id>/art/).
+        for (const m of text.matchAll(/<image\b[^>]*?\b(?:xlink:)?href="(?:\.\.\/)+(images\/[^"]+)"/g)) {
+          const file = m[1];
+          if (S.imageUrls.has(file)) continue;
+          const atlasEntry = zip.file(file);
+          if (!atlasEntry) continue;
+          const buf = await atlasEntry.async('arraybuffer');
+          S.imageUrls.set(file, URL.createObjectURL(new Blob([buf], { type: imageMimeFor(file) })));
+        }
+      }
       // Raster layer: read the embedded image once into a blob URL.
       if (layer.image && layer.image.file && !S.imageUrls.has(layer.image.file)) {
         const imgEntry = zip.file(layer.image.file);
@@ -896,8 +910,23 @@ function applyLayerStyle(el, layer) {
 // and the stage), where element ids are global: gradient ids such as `g0`
 // repeat across layers and panels. Rename each gradient definition and
 // every `url(#id)` reference to it with a page-unique suffix before import.
+// Textured strokes (1.1): the pattern images point at archive entries
+// relative to the art SVG; point them at the blob URLs loaded above.
+function resolveAtlasHrefs(doc) {
+  doc.querySelectorAll('pattern image').forEach(img => {
+    const href = img.getAttribute('href') || img.getAttribute('xlink:href');
+    if (!href) return;
+    const m = /^(?:\.\.\/)+(images\/.+)$/.exec(href);
+    if (!m) return;
+    const url = S.imageUrls && S.imageUrls.get(m[1]);
+    if (url) { img.setAttribute('href', url); img.removeAttribute('xlink:href'); }
+  });
+}
+
 function uniquifyGradientIds(doc) {
-  const grads = doc.querySelectorAll('linearGradient, radialGradient');
+  // Patterns (1.1 "Textured strokes") share the id space: `tex4` repeats
+  // across layers exactly like `g0`.
+  const grads = doc.querySelectorAll('linearGradient, radialGradient, pattern');
   if (!grads.length) return;
   const renames = new Map();
   grads.forEach(g => {
@@ -1004,6 +1033,7 @@ function compositeSVG(panel, mini = false) {
     if (!svgStr) continue;
     const doc = parser.parseFromString(svgStr, 'image/svg+xml');
     uniquifyGradientIds(doc);
+    resolveAtlasHrefs(doc);
     // Gradient definitions a third-party writer put outside the layer <g>
     // (Upshot puts its <defs> inside the <g>, so they ride along below).
     const rootDefs = Array.from(doc.documentElement.children)

@@ -105,7 +105,9 @@ strings, unique within the file, safe as file names (`[A-Za-z0-9_-]`).
 | `created_at`, `modified_at` | string | ISO-8601 UTC. |
 | `canvas.width`, `canvas.height` | double | Frame size in world units (height is 540 by convention). |
 | `canvas.resolution.width/height` | int | Render size in pixels. |
-| `canvas.fps` | number | Frame rate. Durations are stored in seconds; this is the grid they were authored on (Upshot uses 24). |
+| `canvas.fps` | number | Frame rate, a whole number. Durations are stored in seconds; this is the grid they were authored on. Upshot writes the project's rate (24 by default), reads the key on import (absent = 24) and refuses fractional rates such as 23.976 or 29.97. |
+| `layer_layout` | array | Optional (*1.1*). The layer stack a new panel starts with, top to bottom: `[{"name", "kind", "visible", "locked", "opacity", "group"}]`. `kind` is `"vector"` (default) or `"group"`; a group entry is a folder record from writers whose layouts have them. Upshot skips those and expresses folders through `group`, the folder name on each member. Defaults: `visible` true, `locked` false, `opacity` 100 (0–100), `group` `""`. Absent or empty means one default layer. In Storyboard Pro this is a user preference rather than a project setting, so the Toon Boom scripts export it from the preference and ask before applying an imported one. |
+| `sync` | object | Optional (*1.1*). `{"panels": {"<panelID>": "<16 hex>"}}`: for each panel the writer has not changed since it last exchanged it, the panel digest of that exchange, its base (see "Merging"). A panel the writer changed, or never exchanged, has no entry. |
 | `x-upshot` | object | Optional vendor block (editor state). See "Extending the format". |
 
 **Upshot's `x-upshot` block in `project.json`** is editor state, written on
@@ -268,14 +270,18 @@ Upshot as another writer's archive (see `code` under `panel.json`).
 | `image.file` | string | Archive entry path (`images/<name>`). PNG or JPEG. |
 | `image.w`, `image.h` | int | Natural pixel size of the file. |
 | `image.transform` | [a,b,c,d,tx,ty] | Affine from image space to world. Image space is the `w × h` pixel rect **centred on its own origin**, y down. `x' = a·x + c·y + tx`, `y' = b·x + d·y + ty`. |
+| `shared` | string | Optional (*1.1*). The id of a shared drawing (`shared/index.json`) whose art this layer carries unchanged. A reader may draw the shared art in its place or link the layer to the drawing, as Storyboard Pro does. The layer's own `art` is still complete, so readers without shared drawings lose nothing. Upshot writes it only while the layer's strokes still equal the drawing's; its private `x-upshot.shared_ref` keeps the link on a copy that has since diverged. |
 | `x-upshot` | object | Optional vendor block (*1.1*). See "Derived layers" below. |
 
-#### Derived layers (pencil split, 1.1)
+#### Derived layers (pencil split, 1.1, legacy)
 
-Upshot's textured pencil renders a stroke from a centreline and a stamping
-recipe that are not public. So that every reader still shows the texture,
-a layer that holds pencil strokes is written as **up to three layers**: the
-source layer itself, hidden, and two visible copies derived from it.
+Early 1.1 versions of Upshot wrote a layer holding pencil strokes as **up
+to three layers**: the source layer itself, hidden, plus two visible copies
+derived from it. Upshot now writes textured strokes instead (see the art
+SVG section), so the layer stays a single layer with its own name. Files in
+the old layout are still valid 1.1 files and readers must keep honouring
+them. They need nothing new for that: `visible` already shows the two copies
+and hides the source.
 
 ```json
 { "id": "p-1-L1", "name": "Sketch", "color_tag": "#2f6fb0", "opacity": 100,
@@ -309,20 +315,11 @@ source layer itself, hidden, and two visible copies derived from it.
   `layer_tracks` entry whose `name` matches the source is duplicated for
   the two derived names so name-matched animation still applies; the
   duplicates carry `x-upshot: { "derived_from": "<name>", "role": … }`.
-- **Stacking.** Inside one layer, ink and pencil strokes interleave freely
-  in draw order; two whole layers can only stack one above the other. The
-  writer places the raster copy above the vector copy when most pencil
-  strokes were drawn after the ink, otherwise below. Where a pencil and an
-  ink stroke overlap in the opposite order the copies differ from the
-  source at that spot. The hidden source keeps the exact interleaving and
-  is the layer Upshot edits.
-- **Readers need nothing new**: honouring `visible` already shows the two
-  copies and hides the source. Upshot's importer recognises
-  `derived_from` in a file Upshot wrote, drops the copies and the
-  duplicated tracks, and restores the source's visibility from `split`.
-  An archive without a vendor block in `project.json` (another writer's,
-  or a Toon Boom re-export) imports every layer as it is. Writers other
-  than Upshot should not produce derived layers.
+- Upshot's importer recognises `derived_from` in a file Upshot wrote,
+  drops the copies and the duplicated tracks, and restores the source's
+  visibility from `split`. An archive without a vendor block in
+  `project.json` (another writer's, or a Toon Boom re-export) imports every
+  layer as it is. Writers must not produce derived layers.
 
 ### panels/\<id\>/camera.json
 
@@ -384,15 +381,65 @@ exist so Upshot can re-import its own files exactly:
 
 A `<path>` with `sboardx:stroke-type="pencil"` is a textured pencil stroke.
 The path itself is the stroke's **fallback outline**: a closed filled shape
-every renderer can draw, whose `fill-opacity` is the stroke's
-full-coverage alpha. The attributes `sboardx:spine`, `sboardx:pencil` and
+every renderer can draw. The attributes `sboardx:spine`, `sboardx:pencil` and
 `sboardx:grain-offset` carry the data Upshot needs to re-edit the stroke;
 they are private to Upshot and a renderer must not depend on them. Upshot
-never relies on another renderer drawing the texture from them either: a
-layer holding pencil strokes is written as derived layers (see
-`layers.json`), and the derived raster copy is what readers show. A path
-whose `sboardx:stroke-type` is `pencil` but whose private attributes are
-missing or malformed is an ordinary filled outline.
+never relies on another renderer drawing the texture from them either: the
+texture travels as a pattern fill (see "Textured strokes" below; older
+files used derived layers instead, see `layers.json`). A path whose
+`sboardx:stroke-type` is `pencil` but whose private attributes are missing
+or malformed is an ordinary filled outline.
+
+#### Textured strokes (1.1)
+
+A stroke's rendered texture is carried as an SVG **pattern fill** over an
+**atlas** image, so every reader shows the stroke as the writer rendered
+it while the path stays a plain editable outline:
+
+```xml
+  <g sboardx:blend="normal" sboardx:opacity="100"
+     style="mix-blend-mode: normal; opacity: 1.00;">
+    <defs>
+      <pattern id="tex4" patternUnits="userSpaceOnUse" x="-8" y="32"
+               width="68" height="20" viewBox="0 0 136 40"
+               preserveAspectRatio="none">
+        <image href="../../../images/p-1_p-1-L1_pencil.png" x="0" y="0"
+               width="136" height="40" preserveAspectRatio="none"/>
+      </pattern>
+    </defs>
+    <path d="…" fill="url(#tex4)" sboardx:rgba="0.1 0.2 0.3 0.8"
+          fill-rule="nonzero" stroke="none" sboardx:z="4"
+          sboardx:stroke-type="pencil" sboardx:spine="…" sboardx:pencil="…"/>
+  </g>
+```
+
+- The **atlas** is one RGBA PNG per layer, `images/<panelID>_<layerID>_pencil.png`
+  (a transparent ground), holding one **tile** per textured stroke: that
+  stroke alone, fully rendered and tinted, alpha included. The `<image>`
+  shows the whole atlas at its pixel size.
+- Each textured `<path>` is filled with its own `<pattern>`: the pattern
+  tile (`x y width height`, `patternUnits="userSpaceOnUse"`) is the world
+  rect the stroke's texture covers, and `viewBox` is the tile's pixel rect
+  inside the atlas, so the pattern stretches exactly that tile over the
+  stroke (`preserveAspectRatio="none"` on both). Ids are unique within the
+  file (`tex<z>` in Upshot's output); the `<defs>` sits first inside the
+  layer `<g>`, beside any gradients.
+- The `href` is relative to the art SVG's own location in the archive
+  (`panels/<id>/art/` → `../../../images/`), so an unzipped archive opens in
+  any SVG viewer; a reader that composes SVGs itself resolves the entry
+  from the archive.
+- A textured path always carries `sboardx:rgba`, the stroke's flat colour
+  and alpha (the tile's mean colour and mean coverage over the outline's
+  area is a good choice), and no `fill-opacity`. A reader without pattern
+  support fills the outline with that colour. A reader that draws the
+  pattern draws the tile as it is, at full opacity: the tile carries its
+  own alpha, and the alpha in `sboardx:rgba` belongs to the flat fallback
+  only. A pencil path without a pattern (from a writer without an image
+  encoder) is the plain outline with `fill-opacity`, as before.
+- Any writer may texture any stroke this way, for example a Toon Boom
+  textured brush stroke. The mechanism is the SVG pattern, not the pencil
+  attributes. Upshot imports such a path as an ordinary ink stroke in its
+  `sboardx:rgba` (or `fill`) colour.
 
 #### Gradient fills (1.1)
 
@@ -459,8 +506,54 @@ numbers or percentages, stops given as attributes or as
 `style="stop-color:…; stop-opacity:…"`, and one level of `href` /
 `xlink:href` stop inheritance. A gradient with a single stop imports as
 that flat colour; a `url(#…)` that resolves to nothing imports black.
-Focal points (`fx`, `fy`), `spreadMethod` other than pad, pattern fills,
-text, images and clip masks inside the art SVG are ignored.
+Focal points (`fx`, `fy`) and `spreadMethod` other than pad are ignored.
+A pattern fill (*1.1* "Textured strokes") is never rendered by the
+importer: the path imports in its `sboardx:rgba` colour (black when that
+attribute is absent too) and the pattern's image is not extracted. Text,
+images and clip masks inside the art SVG are ignored.
+
+### palettes.json (optional, 1.1)
+
+```json
+{
+  "palettes": [
+    { "id": "pal-1", "name": "Project",
+      "colors": [
+        { "id": "c-1", "name": "Sky",  "r": 0.2, "g": 0.5, "b": 0.9, "a": 1.0 },
+        { "id": "c-2", "name": "Wash", "r": 0.1, "g": 0.2, "b": 0.3, "a": 0.5 }
+      ] }
+  ]
+}
+```
+
+The document's colour palettes, for readers that offer them as swatches
+(Upshot's Colour tab, Storyboard Pro's palette list). Absent = none.
+
+| Key | Type | Notes |
+|---|---|---|
+| `palettes[].id`, `colors[].id` | string | Stable ids, unique within the file; a reader keeps the ids it received (Upshot adopts Toon Boom's 16-hex ids; the Toon Boom bridge keys its palette by name because Storyboard Pro mints its own colour ids). |
+| `name` | string | Display name; may be empty. |
+| `r`, `g`, `b`, `a` | double | 0–1 (readers clamp). Solid colours only; gradient and texture pots are not carried. |
+
+### shared/ (optional, 1.1)
+
+```
+shared/index.json
+shared/<id>/art.svg
+```
+
+```json
+{ "drawings": [ { "id": "sd-1", "name": "Prop", "art": "sd-1/art.svg" } ] }
+```
+
+Shared drawings (Storyboard Pro's "shared drawing": one drawing used by
+several panels' layers; Upshot's library of insert-as-copy drawings). Each
+entry's `art` is an art SVG exactly like a layer's (same dialect, the
+`<g>` id is the drawing id; textured strokes use an atlas named
+`images/shared-<id>_<id>_pencil.png` with `../../images/` hrefs). A layer
+that carries a drawing's art unchanged names it in `layers.json` `shared`.
+Absent = no shared drawings. Readers that don't support them ignore the
+directory; every holder layer still has its full art.
 
 ### audio/clips.json
 
@@ -520,11 +613,66 @@ still complete. Writers should omit them at their default value.
 | `clips.json` | `tracks` | one unmuted track |
 | `sequence.json` | `sequences` | none |
 | `sequence.json` | `transitions` | `[]` |
+| `palettes.json` (entry) | document palettes | none |
+| `project.json` | `layer_layout` | one default layer |
+| `shared/` (entries) | shared drawings | none |
+| `layers.json` layer | `shared` | not a shared drawing's copy |
 | art SVG `<path>` | `sboardx:stroke-type` | `boundary` |
 | art SVG `<path>` | `fill="url(#…)"` | a flat `fill` colour |
 | `project.json`, `panel.json` | `x-the-storyboard-app` | legacy alias of `x-upshot`, read by Upshot |
 | any | `x-*` | ignored |
 | art SVG | `sboardx:*` | ignored |
+
+## Merging (optional)
+
+Two apps editing the same board can exchange `.sboardx` files in both
+directions. Ids make that possible: a reader that merges matches scenes and
+panels **by id**, so a writer must keep the ids it received. Upshot keeps
+every id an archive carries; the Toon Boom scripts map Upshot's ids to
+Storyboard Pro's own and export under the received ids. A copied or
+duplicated panel is a new panel with a new id.
+
+**Panel digest.** To tell what changed since the last exchange, a merging
+reader fingerprints each panel of the archive. Every implementation must
+hash the same bytes, so the rule is fixed: FNV-1a 64 over, in order,
+
+1. `panels/<id>/panel.json` with its `code` member removed (codes are
+   renumbered by every reorder),
+2. `panels/<id>/layers.json`,
+3. for each layer in `layers.json` order: its `art` entry, its `image.file`
+   when it has one, and `images/<id>_<layerID>_pencil.png` when that entry
+   exists.
+
+Each entry contributes its name's UTF-8 bytes, a 0x00, its raw bytes and a
+0x00. An absent entry contributes its name, 0x00, 0xFF. The hex of the
+result is the panel's digest. `code` is cut textually: the quoted key,
+optional whitespace, the colon, optional whitespace and the quoted value,
+plus the comma after it (or, failing that, the comma before it).
+
+**Bases.** Which digest a panel had at the last exchange is each app's own
+bookkeeping, with one exception that lives in the archive. Two writers
+never produce the same bytes for the same panel, so a writer that merely
+passed a panel through would otherwise make every merge replace it.
+`project.json` `sync.panels` therefore names, for each panel the writer has
+not changed since it last exchanged it, the digest of that exchange: the
+panel's **base**. A merging reader whose own baseline for the panel equals
+that digest treats the panel as unchanged, whatever its bytes. A panel
+without a base is judged by its bytes. After a merge, the reader's baseline
+for a panel it takes or keeps is the declared base when there is one, else
+the archive's digest. A writer whose panel is unchanged keeps the base it
+declared rather than the digest of its latest bytes. That way both sides go
+on naming the same exchange until one of them changes the panel.
+
+**Scene cameras** merge the same way per scene (unchanged, updated, changed
+here only, changed on both sides), over a digest of the camera keyframes
+and layer tracks in `sequence.json` taken by value: times, zoom, centre,
+rotation, track names, pivots and keyframe values. Keyframe ids are not
+part of it, since writers re-mint them. A taken camera replaces the scene's
+keyframes and tracks as a whole, with the archive's scene-local times.
+
+**Audio** has no baseline. A merge offers to replace the receiving
+document's clips and tracks with the file's as a whole, off unless asked,
+never clip by clip.
 
 ## Extending the format
 

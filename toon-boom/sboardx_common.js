@@ -1,156 +1,104 @@
-// sboardx_common.js — helpers shared by sboardx_import.js and
-// sboardx_export.js (the implementation modules behind TB_ImportSboardx.js /
-// TB_ExportSboardx.js). Keep all five files in the same folder.
+// sboardx_common.js — helpers shared by sboardx_import.js, sboardx_export.js
+// and sboardx_merge.js, the modules behind the TB_*.js entry points. Keep
+// all seven files in the same folder. Needs Storyboard Pro 27.
 
+// ── Log, prompts, progress ──────────────────────────────────────────────────
+
+// `quiet` (batch): messages go to the Message Log, never to a dialog.
 function makeLog(prefix, quiet) {
     var warnings = [];
     return {
         warnings: warnings,
+        trace: function (msg) { MessageLog.trace(prefix + msg); },
+        warn: function (msg) { MessageLog.error(prefix + msg); warnings.push(msg); },
         report: function (msg, isError) {
-            if (quiet) {
-                if (isError) MessageLog.error(prefix + msg);
-                else MessageLog.trace(prefix + msg);
-            } else if (isError) {
-                MessageBox.critical(msg);
-            } else {
-                MessageBox.information(msg);
-            }
+            if (quiet) MessageLog[isError ? "error" : "trace"](prefix + msg);
+            else if (isError) MessageBox.critical(msg);
+            else MessageBox.information(msg);
         },
-        trace: function (msg) {
-            MessageLog.trace(prefix + msg);
-        },
-        warn: function (msg) {
-            MessageLog.error(prefix + msg);
-            warnings.push(msg);
+        // The run's result: the counts, then every warning raised.
+        summary: function (counts) {
+            return warnings.length ? counts + "\n\nWarnings:\n- " + warnings.join("\n- ") : counts;
         }
     };
 }
 
-// A window-modal progress dialog with a Cancel button. Every method is safe
-// to call when the dialog could not be created (batch mode, or a build
-// without the QProgressDialog binding): it then does nothing.
-//
-// Probed on SBP: the binding exposes Qt *slots* as methods (setValue,
-// setLabelText, setRange, setMinimumDuration, show, close, repaint) and
-// Q_PROPERTYs as plain properties (autoClose, windowModality, wasCanceled,
-// minimumWidth). Ordinary methods such as setAutoClose() or setModal() are
-// "not a function", so everything non-slot goes through properties, and
-// each optional call is isolated so one failure cannot lose the dialog.
+// An OK/Cancel prompt. Dialogs cannot be created in batch mode: callers
+// decide without asking when quiet.
+function confirm(title, text) {
+    var d = new Dialog();
+    d.title = title;
+    var l = new Label();
+    l.text = text;
+    d.add(l);
+    return !!d.exec();
+}
+
+// The script keeps the UI thread busy: repaint and drain pending events.
+function pumpEvents(widget) {
+    if (widget) widget.repaint();
+    QCoreApplication.processEvents();
+}
+
+// A window-modal progress dialog with a Cancel button; every method is a
+// no-op when quiet. The binding exposes Qt slots as methods and
+// Q_PROPERTYs as plain properties.
 function makeProgress(title, quiet) {
-    var dlg = null;
-    var done = 0, total = 0;
-    var reported = {};
-    // Problems with the dialog must never break the export, but they should
-    // be visible once in the Message Log.
-    var note = function (what, e) {
-        if (reported[what]) return;
-        reported[what] = true;
-        try { MessageLog.trace("[sboardx] progress dialog: " + what + " failed: " + e); }
-        catch (e2) {}
-    };
-    // Set a Qt property, trying the setter slot first when one exists.
-    var set = function (prop, setter, value) {
-        try {
-            if (typeof dlg[setter] == "function") { dlg[setter](value); return; }
-        } catch (e) { note(setter, e); }
-        try { dlg[prop] = value; } catch (e2) { note(prop, e2); }
-    };
-    // The script keeps the UI thread busy, so the dialog only repaints when
-    // we make it: force a paint, then drain a burst of pending events.
-    var pump = function () {
-        try { if (dlg) dlg.repaint(); } catch (e) { note("repaint", e); }
-        try {
-            if (typeof QCoreApplication != "undefined" &&
-                typeof QCoreApplication.processEvents == "function") {
-                QCoreApplication.processEvents();
-                return;
-            }
-        } catch (e3) { note("QCoreApplication.processEvents", e3); }
-        try {
-            if (typeof QApplication != "undefined" &&
-                typeof QApplication.processEvents == "function") {
-                QApplication.processEvents();
-                return;
-            }
-        } catch (e7) { note("QApplication.processEvents", e7); }
-        try { for (var i = 0; i < 10; i++) System.processOneEvent(); }
-        catch (e4) { note("processOneEvent", e4); }
-    };
+    var dlg = null, done = 0, total = 0;
     if (!quiet) {
-        try {
-            dlg = new QProgressDialog(title, "Cancel", 0, 100);
-        } catch (e6) {
-            note("create", e6);
-            dlg = null;
-        }
-    }
-    if (dlg) {
-        set("windowTitle", "setWindowTitle", title);
-        // Modal matters: QProgressDialog only pumps events inside
-        // setValue() when it is modal.
-        set("windowModality", "setWindowModality", enumOr(Qt.WindowModal, 1));
-        set("minimumDuration", "setMinimumDuration", 0);
-        set("autoClose", "setAutoClose", false);
-        set("autoReset", "setAutoReset", false);
-        set("minimumWidth", "setMinimumWidth", 420);
-        try { dlg.show(); } catch (e9) { note("show", e9); }
-        pump();
+        dlg = new QProgressDialog(title, "Cancel", 0, 100);
+        dlg.setWindowTitle(title);
+        dlg.windowModality = Qt.WindowModal;   // modal: setValue() pumps events
+        dlg.setMinimumDuration(0);
+        dlg.autoClose = false;
+        dlg.autoReset = false;
+        dlg.minimumWidth = 420;
+        dlg.show();
+        pumpEvents(dlg);
     }
     return {
-        // Total number of steps (0 = busy indicator with no known length).
         begin: function (n) {
             if (!dlg) return;
             done = 0; total = n;
-            try { dlg.setRange(0, n); dlg.setValue(0); pump(); }
-            catch (e) { note("begin", e); }
+            dlg.setRange(0, n); dlg.setValue(0); pumpEvents(dlg);
         },
-        // Advance one step, showing what is being worked on.
         step: function (label) {
             if (!dlg) return;
             done++;
-            try {
-                dlg.setLabelText(done + " of " + total + " — " + label);
-                dlg.setValue(done);
-                pump();
-            } catch (e) { note("step", e); }
+            dlg.setLabelText(done + " of " + total + " — " + label); dlg.setValue(done); pumpEvents(dlg);
         },
-        // Switch to a busy indicator for a phase with no step count.
         busy: function (label) {
             if (!dlg) return;
-            try { dlg.setLabelText(label); dlg.setRange(0, 0); pump(); }
-            catch (e) { note("busy", e); }
+            dlg.setLabelText(label); dlg.setRange(0, 0); pumpEvents(dlg);
         },
-        cancelled: function () {
-            if (!dlg) return false;
-            try {
-                var c = dlg.wasCanceled;
-                if (typeof c == "function") c = dlg.wasCanceled();
-                return c === true;
-            } catch (e) { note("wasCanceled", e); return false; }
-        },
+        cancelled: function () { return dlg ? dlg.wasCanceled === true : false; },
         close: function () {
             if (!dlg) return;
             var d = dlg;
-            dlg = null;   // pump() must not repaint a dialog being deleted
-            try { d.close(); } catch (e) { note("close", e); }
-            try { d.hide(); } catch (e2) {}
-            try { d.deleteLater(); } catch (e3) {}
-            pump();
+            dlg = null;
+            d.close(); d.deleteLater(); pumpEvents(null);
         }
     };
 }
+
+// The scripting API the bridge needs; false (with a message) on an older
+// Storyboard Pro.
+function requireApi(log) {
+    if (typeof importer != "undefined" && typeof Drawing != "undefined" &&
+        typeof PaletteObjectManager != "undefined" && typeof MotionManager != "undefined") return true;
+    log.report("This script needs Storyboard Pro 27 or newer.", true);
+    return false;
+}
+
+// ── Files and processes ─────────────────────────────────────────────────────
 
 function readTextFile(path) {
     var f = new File(path);
     if (!f.exists) return null;
-    try {
-        f.open(FileAccess.ReadOnly);
-        var text = f.read();
-        f.close();
-        return text;
-    } catch (e) {
-        return null;
-    }
+    f.open(FileAccess.ReadOnly);
+    var text = f.read();
+    f.close();
+    return text;
 }
 
 function writeTextFile(path, text) {
@@ -162,214 +110,123 @@ function writeTextFile(path, text) {
 
 function readJsonFile(path) {
     var text = readTextFile(path);
-    if (text === null) return null;
-    try {
-        return JSON.parse(text);
-    } catch (e) {
-        return null;
-    }
+    try { return text === null ? null : JSON.parse(text); } catch (e) { return null; }
 }
 
-function fileExists(path) {
-    return new File(path).exists;
-}
+function fileExists(path) { return new File(path).exists; }
 
 function fileBasename(path) {
     var s = String(path).replace(/\\/g, "/");
-    var i = s.lastIndexOf("/");
-    return i >= 0 ? s.substring(i + 1) : s;
+    return s.substring(s.lastIndexOf("/") + 1);
+}
+
+function fileDirname(path) {
+    var s = String(path).replace(/\\/g, "/");
+    return s.substring(0, s.lastIndexOf("/"));
 }
 
 function makeTempDir(kind) {
-    var dir = String(specialFolders.temp).replace(/\\/g, "/") +
-              "/sboardx-" + kind + "-" + new Date().getTime();
+    var dir = String(specialFolders.temp).replace(/\\/g, "/") + "/sboardx-" + kind + "-" + new Date().getTime();
     new Dir(dir).mkdirs();
     return dir;
 }
 
+function copyFile(src, dst) {
+    try { new File(dst).remove(); } catch (e) {}
+    return QFile.copy(src, dst);
+}
+
+function imageSize(path) {
+    var im = new QImage(path);
+    return im.isNull() ? null : { w: im.width(), h: im.height() };
+}
+
+// A file's bytes as an array of 0..255 (null when it cannot be opened).
+function readFileBytes(path) {
+    var f = new QFile(path);
+    if (!f.open(QIODevice.ReadOnly)) return null;
+    var ba = f.readAll();
+    f.close();
+    var n = ba.size(), out = new Array(n);
+    for (var i = 0; i < n; i++) out[i] = ba.at(i) & 0xff;
+    return out;
+}
+
 function xmlEscape(s) {
-    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
-                    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function enumOr(value, fallback) {
-    return value === undefined || value === null ? fallback : value;
-}
+function shQuote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+function cmdQuote(s) { return '"' + String(s) + '"'; }   // Windows paths never contain a quote
 
-// Runs a command through Process2 and waits for it, pumping the event loop
-// so a progress dialog stays live. There is no time limit; an optional
-// isCancelled() callback (the dialog's Cancel button) terminates the
-// process instead. Returns { code, cancelled, elapsedMs, message }: `code`
-// is 0 on a clean exit, the process's error code otherwise, and -1 when it
-// could not be started or was cancelled. `message` is Process2's own error
-// text when the API provides one.
-function runProcess(args, warn, isCancelled) {
-    var failed = function (message) {
-        return { code: -1, cancelled: false, elapsedMs: 0, message: message };
-    };
-    if (typeof Process2 == "undefined") {
-        if (warn) warn("the Process2 scripting API is unavailable");
-        return failed("Process2 unavailable");
-    }
-    var a = args;
-    var p;
-    try {
-        if (a.length === 3) p = new Process2(a[0], a[1], a[2]);
-        else if (a.length === 4) p = new Process2(a[0], a[1], a[2], a[3]);
-        else if (a.length === 5) p = new Process2(a[0], a[1], a[2], a[3], a[4]);
-        else if (a.length === 6) p = new Process2(a[0], a[1], a[2], a[3], a[4], a[5]);
-        else if (a.length === 12) p = new Process2(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]);
-        else if (a.length === 13) p = new Process2(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12]);
-        else {
-            if (warn) warn("runProcess: unsupported arg count " + a.length);
-            return failed("unsupported arg count " + a.length);
-        }
-    } catch (e) {
-        if (warn) warn("could not create external process '" + a[0] + "': " + e);
-        return failed(String(e));
-    }
-    var t0 = new Date().getTime();
-    var launchCode = p.launch();
-    var cancelled = false;
+// Runs a command (program + arguments) through the shell and waits for it,
+// pumping events so a progress dialog stays live; stderr goes to logPath.
+// isCancelled() (the dialog's Cancel button) terminates the process.
+// Returns { code, cancelled, stderr }: code 0 is a clean exit.
+function runProcess(args, logPath, isCancelled) {
+    var p = about.isWindowsArch()
+        ? new Process2("cmd", "/c", args.map(cmdQuote).join(" ") + " 2>" + cmdQuote(logPath))
+        : new Process2("sh", "-c", args.map(shQuote).join(" ") + " 2>" + shQuote(logPath));
+    var launched = p.launch();
     while (p.isAlive()) {
         System.processOneEvent();
-        if (isCancelled && isCancelled()) { cancelled = true; break; }
+        if (isCancelled && isCancelled()) {
+            p.terminate();
+            return { code: -1, cancelled: true, stderr: "" };
+        }
     }
-    var elapsedMs = new Date().getTime() - t0;
-    var message = "";
-    try {
-        if (typeof p.errorMessage == "function") message = String(p.errorMessage() || "");
-    } catch (e2) {}
-    if (cancelled) {
-        p.terminate();
-        if (warn) warn("'" + a[0] + "' was cancelled after " +
-            Math.round(elapsedMs / 1000) + " s");
-        return { code: -1, cancelled: true, elapsedMs: elapsedMs, message: message };
-    }
-    var err = p.errorCode();
-    return { code: err !== 0 ? err : launchCode, cancelled: false,
-             elapsedMs: elapsedMs, message: message };
+    var code = p.errorCode() || launched;
+    var stderr = code ? String(readTextFile(logPath) || "").replace(/^\s+|\s+$/g, "") : "";
+    return { code: code, cancelled: false, stderr: stderr };
 }
 
-function psQuote(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
-function shQuote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
-
-// Process2 does not expose the child's stderr, so to see what a failing
-// command actually said we run it again through a shell that redirects
-// stderr and the exit code into logPath. Returns the captured text, or null
-// when the wrapper itself produced nothing.
-function runCaptured(args, logPath, warn) {
-    try { new File(logPath).remove(); } catch (e) {}
-    if (about.isWindowsArch()) {
-        // Single quotes only, so nothing has to survive Process2's own
-        // argument quoting. PowerShell 5.1 wraps each stderr line in an
-        // error record, so the log is verbose but complete; a missing 'tar'
-        // lands in the catch.
-        var out = " | Out-File -Append -Encoding utf8 -LiteralPath " + psQuote(logPath);
-        var ps = "try { & " + args.map(psQuote).join(" ") + " 2> " + psQuote(logPath) +
-            " } catch { $_.ToString()" + out + " }; " +
-            "('exit code ' + $LASTEXITCODE)" + out;
-        runProcess(["powershell", "-NoProfile", "-Command", ps], warn);
-    } else {
-        var cmd = args.map(shQuote).join(" ") + " 2>" + shQuote(logPath) +
-                  "; echo \"exit code $?\" >>" + shQuote(logPath);
-        runProcess(["sh", "-c", cmd], warn);
-    }
-    var text = readTextFile(logPath);
-    if (text === null) return null;
-    text = String(text).replace(/^\s+|\s+$/g, "");
-    return text;
+function processFailure(name, r) {
+    return name + " failed with code " + r.code + (r.stderr ? ": " + r.stderr : "");
 }
 
-// Turns a runProcess result into a warning line naming the command.
-function describeProcessResult(name, r, warn) {
-    var secs = (r.elapsedMs / 1000).toFixed(1) + " s";
-    warn("'" + name + "' " + (r.code === 0 ? "exited cleanly" : "failed with code " + r.code) +
-         " after " + secs + " but produced no output file" +
-         (r.message ? " (" + r.message + ")" : ""));
-}
-
-function extractZip(zipPath, destPath, warn) {
+function extractZip(zipPath, destPath, log) {
     new Dir(destPath).mkdirs();
-    runProcess(["tar", "-xf", zipPath, "-C", destPath], warn);
+    var r = runProcess(["tar", "-xf", zipPath, "-C", destPath], destPath + "/tar.log");
     if (fileExists(destPath + "/project.json")) return true;
-    if (about.isMacArch()) {
-        runProcess(["/usr/bin/unzip", "-o", zipPath, "-d", destPath], warn);
-    } else if (about.isWindowsArch()) {
-        var cmd = "Copy-Item -LiteralPath '" + zipPath + "' -Destination '" +
-            destPath + "/archive.zip'; " +
-            "Expand-Archive -LiteralPath '" + destPath + "/archive.zip' " +
-            "-DestinationPath '" + destPath + "' -Force";
-        runProcess(["powershell", "-NoProfile", "-Command", cmd], warn);
-    } else {
-        runProcess(["unzip", "-o", zipPath, "-d", destPath], warn);
-    }
-    return fileExists(destPath + "/project.json");
+    log.warn(processFailure("tar", r));
+    return false;
 }
 
-// Throws { sboardxCancelled: true } when isCancelled() stops the zip.
-function createStoreZip(stagingDir, entries, zipPath, warn, isCancelled) {
+// A STORE-only zip of `entries` under stagingDir. Throws
+// { sboardxCancelled: true } when isCancelled() stops it.
+function createStoreZip(stagingDir, entries, zipPath, log, isCancelled) {
     try { new File(zipPath).remove(); } catch (e) {}
     if (fileExists(zipPath)) {
-        warn("could not delete the existing " + zipPath +
-             " (is it open in another program?)");
+        log.warn("could not delete the existing " + zipPath + " (is it open in another program?)");
+        return false;
     }
-    var tarArgs = ["tar", "--format=zip", "--options", "zip:compression=store",
-                   "-cf", zipPath, "-C", stagingDir].concat(entries);
-    var r = runProcess(tarArgs, warn, isCancelled);
+    var args = ["tar", "--format=zip", "--options", "zip:compression=store", "-cf", zipPath, "-C", stagingDir].concat(entries);
+    var r = runProcess(args, stagingDir + "/tar.log", isCancelled);
     if (r.cancelled) {
         try { new File(zipPath).remove(); } catch (e1) {}
         throw { sboardxCancelled: true };
     }
     if (fileExists(zipPath)) return true;
-    describeProcessResult("tar", r, warn);
-    // Diagnostic re-run with tar's own stderr and exit code captured.
-    var logPath = stagingDir + "/tar-stderr.txt";
-    var said = runCaptured(tarArgs, logPath, warn);
-    if (said === null) {
-        warn("no output could be captured from 'tar' (the shell wrapper itself " +
-             "produced nothing)");
-    } else {
-        warn("'tar' said (" + logPath + "):\n" + (said || "(nothing)"));
-    }
-    if (fileExists(zipPath)) {
-        warn("the re-run through the shell produced the zip; only the direct " +
-             "launch of 'tar' from Storyboard Pro failed");
-        return true;
-    }
-    if (about.isMacArch()) {
-        runProcess(["sh", "-c",
-                    "cd '" + stagingDir + "' && /usr/bin/zip -r -X -0 '" +
-                    zipPath + "' " + entries.join(" ")], warn);
-    }
-    return fileExists(zipPath);
+    log.warn(processFailure("tar", r));
+    return false;
 }
 
-function copyFile(src, dst, warn) {
-    try {
-        if (typeof QFile != "undefined" && typeof QFile.copy == "function") {
-            try { new File(dst).remove(); } catch (e) {}
-            if (QFile.copy(src, dst)) return true;
+// ── Storyboard Pro project helpers ──────────────────────────────────────────
+
+// fn(sceneId, panelId, sceneIndex, panelIndex) for every panel, in order.
+function forEachPanel(sb, fn) {
+    for (var s = 0; s < sb.numberOfScenesInProject(); s++) {
+        var sceneId = String(sb.sceneInProject(s));
+        for (var p = 0; p < sb.numberOfPanelsInScene(sceneId); p++) {
+            fn(sceneId, String(sb.panelInScene(sceneId, p)), s, p);
         }
-    } catch (e2) {}
-    if (about.isWindowsArch()) {
-        runProcess(["cmd", "/c", "copy", "/Y", src.replace(/\//g, "\\"),
-                    dst.replace(/\//g, "\\")], warn);
-    } else {
-        runProcess(["cp", src, dst], warn);
     }
-    return fileExists(dst);
 }
 
-function imageSize(path) {
-    try {
-        if (typeof QImage == "undefined") return null;
-        var im = new QImage(path);
-        if (im.isNull()) return null;
-        return { w: im.width(), h: im.height() };
-    } catch (e) {
-        return null;
-    }
+function countPanels(sb) {
+    var n = 0;
+    forEachPanel(sb, function () { n++; });
+    return n;
 }
 
 function findPanelCaption(cm, wantedName) {
@@ -387,6 +244,98 @@ function ensurePanelCaption(cm, wantedName) {
     return wantedName;
 }
 
+function metaRecord(name, value) {
+    return { name: name, type: "string", creator: "sboardx", version: "1.0", value: value };
+}
+
+function metaValue(meta) {
+    var raw = (meta && meta.value !== undefined) ? meta.value : meta;
+    return raw ? String(raw) : "";
+}
+
+function panelMetaValue(sb, panelId, name) {
+    try { return metaValue(sb.getPanelMetadata(panelId, name)); } catch (e) { return ""; }
+}
+
+function setPanelMeta(sb, panelId, name, value) {
+    sb.setPanelMetadata(panelId, metaRecord(name, value));
+}
+
+// Drawings are read from the project's saved files (Drawing.query.getData by
+// file name): the export and the update save first — after asking in a
+// session, unconditionally in batch. False when declined or the save failed.
+function ensureProjectSaved(log, quiet, what) {
+    if (project.isDirty() !== true) return true;
+    if (!quiet && !confirm("Unsaved changes",
+            "The project has unsaved changes.\n\n" + what + " reads each drawing from the project's " +
+            "saved files: drawings drawn, edited or shared since the last save would come out empty " +
+            "or out of date.\n\nSave the project now and continue?")) return false;
+    if (project.saveAll() === false) {
+        log.warn("the project could not be saved");
+        return false;
+    }
+    return true;
+}
+
+// Storyboard Pro's default layers for a new panel are the user preference
+// DEFAULT_LAYERS: records of 8 ';'-separated fields separated by an empty
+// field — "A;1;0;13;0;100;0;0;;;BG;1;1;13;0;100;0;0;". Field 0 is the name,
+// 1 the visibility, 5 the opacity; the others are written as a plain layer's.
+function parseDefaultLayers(text) {
+    var out = [];
+    var tokens = String(text || "").split(";");
+    var i = 0;
+    while (i + 8 <= tokens.length) {
+        if (tokens[i] === "") { i++; continue; }
+        var rec = tokens.slice(i, i + 8);
+        var op = parseInt(rec[5], 10);
+        out.push({ name: rec[0], kind: "vector", visible: rec[1] !== "0", locked: false,
+                   opacity: isNaN(op) ? 100 : Math.max(0, Math.min(100, op)), group: "" });
+        i += 8;
+    }
+    return out;
+}
+
+function formatDefaultLayers(entries) {
+    return entries.map(function (e) {
+        var op = Math.round(Math.max(0, Math.min(100, Number(e.opacity === undefined ? 100 : e.opacity))));
+        return e.name + ";" + (e.visible === false ? "0" : "1") + ";0;13;0;" + op + ";0;0;";
+    }).join(";");
+}
+
+// Storyboard Pro sanitises layer names to node names: every character
+// outside [A-Za-z0-9_-] becomes "_". Layer tracks are keyed by name, so
+// both directions match through this.
+function sbpNodeName(name) {
+    return String(name).replace(/[^A-Za-z0-9_\-]/g, "_");
+}
+
+// ── Colours ─────────────────────────────────────────────────────────────────
+
+function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+function to255(v) { return Math.round(clamp01(Number(v) || 0) * 255); }
+
+function colorHex(c) {
+    function h(v) {
+        var s = Math.max(0, Math.min(255, Math.round(v))).toString(16);
+        return s.length < 2 ? "0" + s : s;
+    }
+    return "#" + h(c.r) + h(c.g) + h(c.b);
+}
+
+// FNV-1a 32-bit hex over the string's code units: the bridge's name/id
+// hash (shared drawing ids, texture and gradient colour names).
+function fnv32Hex(s) {
+    var h = 2166136261;
+    for (var i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = (h * 16777619) >>> 0;
+    }
+    return ("00000000" + h.toString(16)).slice(-8);
+}
+
+// ── Camera and layer animation ──────────────────────────────────────────────
+
 function cameraFields(frameH) {
     var perWorldY = project.numberOfUnitsY() / frameH;
     var perWorldX = perWorldY * 3 / 4;
@@ -397,38 +346,21 @@ function cameraFields(frameH) {
     return { perWorldX: perWorldX, perWorldY: perWorldY };
 }
 
-// --- Layer animation (sboardx layer_tracks <-> Storyboard Pro layer keys) ---
-//
-// Probed on SBP 27 (2026-09-23): a layer's animation functions run on REAL
-// 1-based panel frames (frame 1 = the panel's start), exactly like the
-// camera's — addLayerKeyFrame clamps offset 0 to frame 1 and offsets past
-// the panel to its last frame. (The reference's "panels functions are 20
-// frames long" note is stale.) The layer node is "Top/<name>"; its offset
-// is a 3-D path in the camera peg's field units (cameraFields), scale and
-// rotation are bezier columns. Opacity has no function column: setLayerOpacity
-// with a frame sets the whole layer, so opacity keys cannot round-trip.
-
-// Storyboard Pro sanitises layer names to node names: every character
-// outside [A-Za-z0-9_-] becomes "_". Tracks are keyed by name, so both
-// directions match through this.
-function sbpNodeName(name) {
-    return String(name).replace(/[^A-Za-z0-9_\-]/g, "_");
-}
+// A layer's animation functions run on real 1-based panel frames (frame 1 =
+// the panel's start), like the camera's. The layer node is "Top/<name>";
+// its offset is a 3-D path in the camera peg's field units (cameraFields),
+// scale and rotation are bezier columns. Opacity has no function column.
 
 // Seconds within a panel <-> the panel's 1-based frame (clamped to its span).
 function panelTimeToFrame(tInPanel, panelFrames, fps) {
-    var f = Math.round(tInPanel * fps) + 1;
-    if (f < 1) f = 1;
-    if (f > panelFrames) f = panelFrames;
-    return f;
+    return Math.max(1, Math.min(panelFrames, Math.round(tInPanel * fps) + 1));
 }
 function panelFrameToTime(frame, fps) {
     return (frame - 1) / fps;
 }
 
 function wrapDeg(d) {
-    var x = ((d + 180) % 360 + 360) % 360;
-    return x - 180;
+    return ((d + 180) % 360 + 360) % 360 - 180;
 }
 
 // The sboardx pose interpolation (SPEC.md "layer_tracks"): hold at both
@@ -440,8 +372,7 @@ function layerPoseAt(kfs, t) {
             tx: Number(k.tx) || 0, ty: Number(k.ty) || 0,
             s: (typeof k.s === "number" && k.s > 0) ? k.s : 1,
             rot: Number(k.rot) || 0,
-            opacity: (typeof k.opacity === "number")
-                ? Math.max(0, Math.min(1, k.opacity)) : 1
+            opacity: (typeof k.opacity === "number") ? clamp01(k.opacity) : 1
         };
     }
     if (!kfs || !kfs.length) return { tx: 0, ty: 0, s: 1, rot: 0, opacity: 1 };
@@ -451,7 +382,7 @@ function layerPoseAt(kfs, t) {
     while (i + 2 < kfs.length && kfs[i + 1].t <= t) i++;
     var a = pose(kfs[i]), b = pose(kfs[i + 1]);
     var span = kfs[i + 1].t - kfs[i].t;
-    var raw = span > 1e-9 ? Math.max(0, Math.min(1, (t - kfs[i].t) / span)) : 1;
+    var raw = span > 1e-9 ? clamp01((t - kfs[i].t) / span) : 1;
     var f = raw * raw * (3 - 2 * raw);
     return {
         tx: a.tx + (b.tx - a.tx) * f,
@@ -464,17 +395,15 @@ function layerPoseAt(kfs, t) {
 
 // sboardx pose about a pivot -> SBP layer offset/scale/rotation with the
 // pivot folded in (p' = c + T + S·R(p − c) == a pivot-at-origin pose with
-// T' = c + T − S·R·c, the reader's layerPoseMatrix identity). World y is
-// down and SBP's is up; a positive sboardx rotation is clockwise on screen,
-// SBP's counter-clockwise — the camera's sign conventions.
+// T' = c + T − S·R·c). World y is down and SBP's is up; a positive sboardx
+// rotation is clockwise on screen, SBP's counter-clockwise.
 function poseToSbp(pose, px, py, fields) {
     var r = pose.rot * Math.PI / 180;
     var a = pose.s * Math.cos(r), b = pose.s * Math.sin(r);
     var c = -b, d = a;
     var tx = px + pose.tx - (a * px + c * py);
     var ty = py + pose.ty - (b * px + d * py);
-    return { x: tx * fields.perWorldX, y: -ty * fields.perWorldY,
-             scale: pose.s, angle: -pose.rot };
+    return { x: tx * fields.perWorldX, y: -ty * fields.perWorldY, scale: pose.s, angle: -pose.rot };
 }
 function sbpToPose(x, y, scale, angle, fields) {
     return { tx: x / fields.perWorldX, ty: -y / fields.perWorldY,
@@ -482,30 +411,195 @@ function sbpToPose(x, y, scale, angle, fields) {
 }
 
 function isIdentityPose(p) {
-    return Math.abs(p.tx) < 1e-6 && Math.abs(p.ty) < 1e-6 &&
-           Math.abs(p.s - 1) < 1e-6 && Math.abs(wrapDeg(p.rot)) < 1e-6 &&
-           Math.abs(p.opacity - 1) < 1e-6;
+    return Math.abs(p.tx) < 1e-6 && Math.abs(p.ty) < 1e-6 && Math.abs(p.s - 1) < 1e-6 &&
+           Math.abs(wrapDeg(p.rot)) < 1e-6 && Math.abs(p.opacity - 1) < 1e-6;
+}
+
+// ── Merge: the panel digest and the id map (SPEC.md "Merging") ──────────────
+
+// FNV-1a 64 in two 32-bit halves (JavaScript has no 64-bit integers): the
+// hash Upshot's core and sbp-plugin/tests/panel_digest.py compute, pinned
+// by core/tests/fixtures/merge/digest_vectors.json.
+function Fnv1a64() {
+    this.hi = 0xcbf29ce4;
+    this.lo = 0x84222325;
+}
+Fnv1a64.prototype.byte = function (b) {
+    this.lo = (this.lo ^ (b & 0xff)) >>> 0;
+    // The prime is 2^40 + 0x1b3; every product below is exact in a double.
+    var p = this.lo * 0x1b3;
+    var carry = Math.floor(p / 4294967296);
+    this.hi = (((this.hi * 0x1b3) % 4294967296) + ((this.lo << 8) >>> 0) + carry) % 4294967296;
+    this.lo = p - carry * 4294967296;
+};
+Fnv1a64.prototype.bytes = function (arr) {
+    for (var i = 0; i < arr.length; i++) this.byte(arr[i]);
+};
+Fnv1a64.prototype.text = function (s) {
+    this.bytes(utf8Bytes(s));
+};
+Fnv1a64.prototype.hex = function () {
+    function h8(v) { return ("00000000" + (v >>> 0).toString(16)).slice(-8); }
+    return h8(this.hi) + h8(this.lo);
+};
+
+function utf8Bytes(s) {
+    var out = [];
+    s = String(s);
+    for (var i = 0; i < s.length; i++) {
+        var c = s.charCodeAt(i);
+        if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+            var d = s.charCodeAt(i + 1);
+            if (d >= 0xdc00 && d <= 0xdfff) { c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00); i++; }
+        }
+        if (c < 0x80) out.push(c);
+        else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+        else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+        else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    }
+    return out;
+}
+
+// panel.json without its `code` member (PanelDigest.hpp's byte rule: the
+// first "code" key with a string value, with the comma after it, else the
+// comma before it).
+function stripCodeMember(bytes) {
+    var s = String.fromCharCode.apply(null, bytes);
+    var m = /"code"[ \t\n\r]*:[ \t\n\r]*"(?:[^"\\]|\\.)*"/.exec(s);
+    if (!m) return bytes;
+    var start = m.index, end = start + m[0].length;
+    var after = /^[ \t\n\r]*,/.exec(s.substring(end));
+    if (after) end += after[0].length;
+    else {
+        var before = /,[ \t\n\r]*$/.exec(s.substring(0, start));
+        if (before) start = before.index;
+    }
+    return bytes.slice(0, start).concat(bytes.slice(end));
+}
+
+// The archive digest of one panel over an extracted archive (or a staging
+// folder with the same layout): entry name, 0x00, bytes, 0x00 — an absent
+// entry hashes as name, 0x00, 0xFF.
+function archivePanelDigest(rootDir, pid) {
+    var f = new Fnv1a64();
+    function entry(name, transform) {
+        f.text(name);
+        f.byte(0);
+        var bytes = fileExists(rootDir + "/" + name) ? readFileBytes(rootDir + "/" + name) : null;
+        if (!bytes) { f.byte(0xff); return; }
+        f.bytes(transform ? transform(bytes) : bytes);
+        f.byte(0);
+    }
+    var base = "panels/" + pid + "/";
+    entry(base + "panel.json", stripCodeMember);
+    entry(base + "layers.json");
+    var lj = readJsonFile(rootDir + "/" + base + "layers.json");
+    var layers = (lj && lj.layers) || [];
+    for (var i = 0; i < layers.length; i++) {
+        var l = layers[i];
+        if (!l || typeof l !== "object") continue;
+        if (l.art) entry(base + l.art);
+        if (l.image && l.image.file) entry(String(l.image.file));
+        var atlas = "images/" + pid + "_" + l.id + "_pencil.png";
+        if (l.id && fileExists(rootDir + "/" + atlas)) entry(atlas);
+    }
+    return f.hex();
+}
+
+// The project-level id map ("sboardx-ids" project metadata, JSON):
+//   { v: 1,
+//     panels: { <native panel id>: { id: <archive id>,
+//                                    digest: <archive digest of the panel at the last exchange>,
+//                                    local: <digest of the panel's own exported form then> } },
+//     scenes: { <native scene id>: <archive scene id> } }
+// Keyed by native ids, so a duplicated panel is a new panel. Projects
+// imported by older scripts carry the ids as "sboardx-id" panel metadata
+// ("sboardx-scene-id" on a scene's first panel): lifted into the map here,
+// with no baseline (a question on the first merge).
+function loadIdMap(sb, log) {
+    var map = { v: 1, panels: {}, scenes: {} };
+    var raw = "";
+    try { raw = metaValue(sb.getProjectMetadata("sboardx-ids")); } catch (e) {}
+    if (raw) {
+        try {
+            var parsed = JSON.parse(raw);
+            map.panels = parsed.panels || {};
+            map.scenes = parsed.scenes || {};
+        } catch (e2) {
+            log.warn("the project's sboardx-ids metadata is not JSON; the merge baselines start over");
+        }
+    }
+    var seen = {}, live = { panels: {}, scenes: {} };
+    for (var k in map.panels) if (map.panels.hasOwnProperty(k)) seen[map.panels[k].id] = true;
+    forEachPanel(sb, function (sceneId, pid, s, p) {
+        live.scenes[sceneId] = live.panels[pid] = true;
+        if (p === 0 && !map.scenes.hasOwnProperty(sceneId)) {
+            var sid = panelMetaValue(sb, pid, "sboardx-scene-id");
+            if (sid) map.scenes[sceneId] = sid;
+        }
+        if (map.panels.hasOwnProperty(pid)) return;
+        var src = panelMetaValue(sb, pid, "sboardx-id");
+        if (src && !seen[src]) {   // the first holder keeps a copied id
+            map.panels[pid] = newIdEntry(src);
+            seen[src] = true;
+        }
+    });
+    // Entries of deleted panels and scenes are dropped.
+    ["panels", "scenes"].forEach(function (kind) {
+        for (var id in map[kind]) if (map[kind].hasOwnProperty(id) && !live[kind][id]) delete map[kind][id];
+    });
+    return map;
+}
+
+function saveIdMap(sb, map) {
+    sb.setProjectMetadata(metaRecord("sboardx-ids", JSON.stringify({ v: 1, panels: map.panels, scenes: map.scenes })));
+}
+
+function newIdEntry(id) {
+    return { id: id, digest: "", local: "" };
+}
+
+// A native panel's archive id: the map's, else its own (a Toon Boom-born panel).
+function archiveIdOf(map, pid) {
+    var e = map.panels[pid];
+    return e && e.id ? String(e.id) : String(pid);
 }
 
 exports.makeLog = makeLog;
+exports.confirm = confirm;
+exports.pumpEvents = pumpEvents;
 exports.makeProgress = makeProgress;
+exports.requireApi = requireApi;
 exports.readTextFile = readTextFile;
 exports.writeTextFile = writeTextFile;
 exports.readJsonFile = readJsonFile;
 exports.fileExists = fileExists;
 exports.fileBasename = fileBasename;
+exports.fileDirname = fileDirname;
 exports.makeTempDir = makeTempDir;
+exports.copyFile = copyFile;
+exports.imageSize = imageSize;
+exports.readFileBytes = readFileBytes;
 exports.xmlEscape = xmlEscape;
-exports.enumOr = enumOr;
 exports.runProcess = runProcess;
 exports.extractZip = extractZip;
 exports.createStoreZip = createStoreZip;
-exports.copyFile = copyFile;
-exports.imageSize = imageSize;
+exports.forEachPanel = forEachPanel;
+exports.countPanels = countPanels;
 exports.findPanelCaption = findPanelCaption;
 exports.ensurePanelCaption = ensurePanelCaption;
-exports.cameraFields = cameraFields;
+exports.metaRecord = metaRecord;
+exports.panelMetaValue = panelMetaValue;
+exports.setPanelMeta = setPanelMeta;
+exports.ensureProjectSaved = ensureProjectSaved;
+exports.parseDefaultLayers = parseDefaultLayers;
+exports.formatDefaultLayers = formatDefaultLayers;
 exports.sbpNodeName = sbpNodeName;
+exports.clamp01 = clamp01;
+exports.to255 = to255;
+exports.colorHex = colorHex;
+exports.fnv32Hex = fnv32Hex;
+exports.cameraFields = cameraFields;
 exports.panelTimeToFrame = panelTimeToFrame;
 exports.panelFrameToTime = panelFrameToTime;
 exports.wrapDeg = wrapDeg;
@@ -513,3 +607,9 @@ exports.layerPoseAt = layerPoseAt;
 exports.poseToSbp = poseToSbp;
 exports.sbpToPose = sbpToPose;
 exports.isIdentityPose = isIdentityPose;
+exports.Fnv1a64 = Fnv1a64;
+exports.archivePanelDigest = archivePanelDigest;
+exports.loadIdMap = loadIdMap;
+exports.saveIdMap = saveIdMap;
+exports.newIdEntry = newIdEntry;
+exports.archiveIdOf = archiveIdOf;
