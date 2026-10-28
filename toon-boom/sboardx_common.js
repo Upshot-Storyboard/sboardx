@@ -1,6 +1,6 @@
 // sboardx_common.js — helpers shared by sboardx_import.js, sboardx_export.js
 // and sboardx_merge.js, the modules behind the TB_*.js entry points. Keep
-// all seven files in the same folder. Needs Storyboard Pro 27.
+// all seven files in the same folder. Needs Storyboard Pro 24 or newer.
 
 // ── Log, prompts, progress ──────────────────────────────────────────────────
 
@@ -82,11 +82,28 @@ function makeProgress(title, quiet) {
 }
 
 // The scripting API the bridge needs; false (with a message) on an older
-// Storyboard Pro.
+// Storyboard Pro. Besides the documented managers (metadata and layer groups
+// need 22.0.3, setExpandRenderAreaToArtworks needs 24) the scripts use the
+// undocumented drawing API that ships with the "Import Vector File" feature
+// of Storyboard Pro 24 and newer.
 function requireApi(log) {
-    if (typeof importer != "undefined" && typeof Drawing != "undefined" &&
-        typeof PaletteObjectManager != "undefined" && typeof MotionManager != "undefined") return true;
-    log.report("This script needs Storyboard Pro 27 or newer.", true);
+    var missing = [];
+    function need(name, ok) { if (!ok) missing.push(name); }
+    need("MotionManager", typeof MotionManager != "undefined");
+    need("ImportManager", typeof ImportManager != "undefined");
+    need("StoryboardManager.setPanelMetadata", typeof (new StoryboardManager()).setPanelMetadata == "function");
+    need("LayerManager.addGroupLayer", typeof (new LayerManager()).addGroupLayer == "function");
+    need("ExportManager.setExpandRenderAreaToArtworks", typeof (new ExportManager()).setExpandRenderAreaToArtworks == "function");
+    need("importer.parseSVG", typeof importer != "undefined" && typeof importer.parseSVG == "function");
+    need("Drawing.query.getData", typeof Drawing != "undefined" && !!Drawing.query && typeof Drawing.query.getData == "function");
+    need("DrawingTools.createLayers", typeof DrawingTools != "undefined" && typeof DrawingTools.createLayers == "function");
+    need("Tools.createDrawing", typeof Tools != "undefined" && typeof Tools.createDrawing == "function");
+    need("element", typeof element != "undefined");
+    need("PaletteObjectManager", typeof PaletteObjectManager != "undefined");
+    need("QImage", typeof QImage != "undefined");
+    need("QPainter", typeof QPainter != "undefined");
+    if (!missing.length) return true;
+    log.report("This script needs Storyboard Pro 24 or newer (missing: " + missing.join(", ") + ").", true);
     return false;
 }
 

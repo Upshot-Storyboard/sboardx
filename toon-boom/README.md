@@ -8,8 +8,8 @@ exported and applies only what changed to a project that already holds the
 board, panel by panel. Together they let a board travel back and forth
 between Upshot and Storyboard Pro.
 
-Needs **Storyboard Pro 27 or newer**. The scripts write sboardx 1.1 and read
-1.0 and 1.1 archives.
+Needs **Storyboard Pro 24 or newer** (tested on 27). The scripts write
+sboardx 1.1 and read 1.0 and 1.1 archives.
 
 ## Install
 
