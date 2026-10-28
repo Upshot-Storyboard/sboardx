@@ -157,16 +157,26 @@ function xmlEscape(s) {
 }
 
 function shQuote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
-function cmdQuote(s) { return '"' + String(s) + '"'; }   // Windows paths never contain a quote
+// For a line in a .cmd script: Windows paths never contain a quote, and %
+// is doubled so the script does not expand it.
+function cmdQuote(s) { return '"' + String(s).replace(/%/g, "%%") + '"'; }
 
 // Runs a command (program + arguments) through the shell and waits for it,
 // pumping events so a progress dialog stays live; stderr goes to logPath.
 // isCancelled() (the dialog's Cancel button) terminates the process.
 // Returns { code, cancelled, stderr }: code 0 is a clean exit.
+// On Windows the command goes in a .cmd script beside logPath: a quoted
+// command line handed to `cmd /c` loses its outer quotes (and Process2
+// escapes the inner ones), so tar would never start.
 function runProcess(args, logPath, isCancelled) {
-    var p = about.isWindowsArch()
-        ? new Process2("cmd", "/c", args.map(cmdQuote).join(" ") + " 2>" + cmdQuote(logPath))
-        : new Process2("sh", "-c", args.map(shQuote).join(" ") + " 2>" + shQuote(logPath));
+    var p;
+    if (about.isWindowsArch()) {
+        var script = String(logPath).replace(/\.log$/, "") + ".cmd";
+        writeTextFile(script, "@chcp 65001 >nul\r\n@" + args.map(cmdQuote).join(" ") + " 2>" + cmdQuote(logPath) + "\r\n");
+        p = new Process2("cmd", "/c", script.replace(/\//g, "\\"));
+    } else {
+        p = new Process2("sh", "-c", args.map(shQuote).join(" ") + " 2>" + shQuote(logPath));
+    }
     var launched = p.launch();
     while (p.isAlive()) {
         System.processOneEvent();
