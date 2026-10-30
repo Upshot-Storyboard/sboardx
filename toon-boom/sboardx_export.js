@@ -114,10 +114,11 @@ function warnOnce(env, key, text) {
     env.log.warn(text);
 }
 
-// Art beyond the default frame is rendered zoomed out, up to this factor
-// (the render keeps its pixel density, so the output stays within 8192 px).
+// Art beyond the default frame is rendered zoomed out, up to this factor.
+// The render asks for the frame's pixel density; Storyboard Pro caps a
+// render at 4096 px wide, so beyond about two frames out (at 1080p) the
+// textures come at a lower density, never cut.
 var MAX_RENDER_SCALE = 4;
-var MAX_RENDER_PX = 8192;
 
 // ── Merge baselines (SPEC.md "Merging", sboardx_common.js loadIdMap) ────────
 
@@ -1097,8 +1098,7 @@ function ancestorGroups(env, panelId, li) {
 
 // How far the render of a textured layer zooms out so that all of its
 // textured contours fit: 1 when they sit inside the default frame, else the
-// factor by which the frame must grow, up to MAX_RENDER_SCALE and the
-// MAX_RENDER_PX output limit.
+// factor by which the frame must grow, up to MAX_RENDER_SCALE.
 function renderScale(env, job) {
     var halfW = env.frameW / 2, halfH = env.frameH / 2, need = 1;
     job.textured.forEach(function (item) {
@@ -1107,13 +1107,14 @@ function renderScale(env, job) {
         need = Math.max(need, -bb.minX / halfW, bb.maxX / halfW, -bb.minY / halfH, bb.maxY / halfH);
     });
     if (need <= 1.001) return 1;
-    var k = Math.min(need, MAX_RENDER_SCALE, MAX_RENDER_PX / env.resW, MAX_RENDER_PX / env.resH);
+    var k = Math.min(need, MAX_RENDER_SCALE);
     return k > 1.001 ? Math.ceil(k * 100) / 100 : 1;
 }
 
 // One layer of the panel rendered alone (every layer but `keep` hidden) to a
-// PNG, zoomed out by `k` (the image then covers k times the frame at the
-// frame's pixel density); its path, or null.
+// PNG, zoomed out by `k` (the image then covers k times the frame, at the
+// frame's pixel density up to Storyboard Pro's 4096 px cap); its path, or
+// null.
 function renderLayerAlone(env, em, panelId, outId, layerCount, job, keep, k) {
     var dir = env.stagingDir + "/raster/" + outId + "_" + job.li + (k > 1 ? "_x" + k : "");
     new Dir(dir).mkdirs();
@@ -1158,10 +1159,19 @@ function buildAtlas(env, outId, job, src, k) {
         return;
     }
     var W = render.width(), H = render.height();
-    if (k > 1 && (Math.abs(W - env.resW * k) > 2 || Math.abs(H - env.resH * k) > 2)) {
-        warnOnce(env, "zoom-size", "Storyboard Pro rendered " + W + "x" + H + " instead of " + Math.round(env.resW * k) + "x" +
-                 Math.round(env.resH * k) + " for a zoomed-out render; art beyond the frame is cut at the frame");
-        return "retry";
+    if (k > 1) {
+        // Storyboard Pro caps the output at 4096 px wide, keeping the shape:
+        // the image still spans k frames, at a lower density. Another shape
+        // means the zoom did not do what is assumed: plain frame instead.
+        if (Math.abs(W / H - env.resW / env.resH) > 0.02 * env.resW / env.resH) {
+            warnOnce(env, "zoom-size", "Storyboard Pro rendered " + W + "x" + H + " instead of " + Math.round(env.resW * k) + "x" +
+                     Math.round(env.resH * k) + " for a zoomed-out render; art beyond the frame is cut at the frame");
+            return "retry";
+        }
+        if (W < env.resW * k - 2) {
+            warnOnce(env, "zoom-clamp", "Storyboard Pro renders at most " + W + " px wide: layers with strokes more than " +
+                     (W / env.resW).toFixed(1) + " frames out get their textures at a lower pixel density (first: '" + job.layerName + "')");
+        }
     }
     var coverW = env.frameW * k, coverH = env.frameH * k;   // world units the render spans
     var sx = W / coverW, sy = H / coverH;                    // world -> render pixels
@@ -1207,8 +1217,8 @@ function buildAtlas(env, outId, job, src, k) {
         return "retry";
     }
     if (!count) {
-        warnOnce(env, "flat:" + job.layerName, "textured layer '" + job.layerName + "' kept flat (its strokes lie more than " +
-                 MAX_RENDER_SCALE + " frames out)");
+        warnOnce(env, "flat:" + job.layerName, "textured layer '" + job.layerName + "' kept flat (no stroke inside the rendered area" +
+                 (k > 1 ? ", " + k + " frames" : "") + ")");
         return;
     }
     var atlasW = ux1 - ux0, atlasH = uy1 - uy0;

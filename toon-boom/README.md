@@ -196,6 +196,10 @@ Pro. A run that finds nothing to update is fine either way.
 - Layer blur is baked into pixels on import and lost on export.
 - A brush stroke drawn with the brush's Opacity below 100 % is a textured
   stroke in Storyboard Pro and exports opaque.
+- Storyboard Pro renders at most 4096 px wide. A textured layer whose
+  strokes lie more than about two frames out (at 1080p) is rendered zoomed
+  out past that, so its textures come at a lower pixel density; strokes more
+  than four frames out stay flat.
 - Nested layer groups flatten to the innermost group.
 - A gradient on a pencil line flattens to its first stop.
 - A shared drawing that no layer holds cannot be rendered by Storyboard
