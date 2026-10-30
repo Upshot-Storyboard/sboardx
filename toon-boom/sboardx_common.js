@@ -10,7 +10,9 @@ function makeLog(prefix, quiet) {
     return {
         warnings: warnings,
         trace: function (msg) { MessageLog.trace(prefix + msg); },
-        warn: function (msg) { MessageLog.error(prefix + msg); warnings.push(msg); },
+        // Trace, not error: an error line makes Storyboard Pro pop the Message
+        // Log window up, and the summary dialog repeats every warning anyway.
+        warn: function (msg) { MessageLog.trace(prefix + "warning: " + msg); warnings.push(msg); },
         report: function (msg, isError) {
             if (quiet) MessageLog[isError ? "error" : "trace"](prefix + msg);
             else if (isError) MessageBox.critical(msg);
