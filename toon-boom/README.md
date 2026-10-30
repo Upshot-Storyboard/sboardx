@@ -81,7 +81,12 @@ bookkeeping stays with it.
 
 Layers are read back as vectors. Bitmap layers are rendered to images at
 the project resolution and cropped to the frame. Textured strokes go out as
-pattern fills over a per-layer atlas image. Panel notes and dialogue, audio
+pattern fills over a per-layer atlas image: the layer is rendered alone,
+zoomed out up to four frames when its strokes lie outside the frame, with
+its own and its groups' motion set aside for the render, and the render,
+cropped to the area the textured strokes cover, is the atlas; each stroke's
+pattern views its own rectangle of it. An atlas is therefore never larger
+than the render, whatever the number of strokes. Panel notes and dialogue, audio
 tracks, camera moves and sequences come along. A panel's display code is
 `<scene>-<panel>`.
 
@@ -186,7 +191,8 @@ Pro. A run that finds nothing to update is fine either way.
   keeps a constant opacity, and layers export with their constant opacity.
 - Image layers are rendered at the project resolution and cropped to the
   frame. In batch, image layers on a scene with a camera move are skipped,
-  and layer opacity is read from the saved `.sboard` file.
+  layer motion cannot be set aside for a textured layer's render (its tiles
+  may miss), and layer opacity is read from the saved `.sboard` file.
 - Layer blur is baked into pixels on import and lost on export.
 - A brush stroke drawn with the brush's Opacity below 100 % is a textured
   stroke in Storyboard Pro and exports opaque.

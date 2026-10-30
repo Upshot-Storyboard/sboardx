@@ -101,9 +101,23 @@ function makeExportEnv(log, zipPath) {
         textureImages: {},
         syncBases: {},
         counts: { scenes: 0, panels: 0, layers: 0, rasterLayers: 0, atlasLayers: 0,
-                  texturedStrokes: 0, audioClips: 0, palettes: 0 }
+                  texturedStrokes: 0, atlasPixels: 0, audioClips: 0, palettes: 0 },
+        warnedOnce: {}
     };
 }
+
+// A warning written once per key for the whole export (the per-layer,
+// per-panel repeats of one cause drown the summary dialog).
+function warnOnce(env, key, text) {
+    if (env.warnedOnce[key]) return;
+    env.warnedOnce[key] = true;
+    env.log.warn(text);
+}
+
+// Art beyond the default frame is rendered zoomed out, up to this factor
+// (the render keeps its pixel density, so the output stays within 8192 px).
+var MAX_RENDER_SCALE = 4;
+var MAX_RENDER_PX = 8192;
 
 // ── Merge baselines (SPEC.md "Merging", sboardx_common.js loadIdMap) ────────
 
@@ -428,7 +442,7 @@ function collectLibraryDrawings(env) {
                 var outId = "shared-" + rec.id;
                 var job = { kind: "atlas", layerId: rec.id, layerName: rec.name, textured: rec.model.textured, atlas: null };
                 var src = renderTexturedModel(env, rec.model, outId);
-                if (src) buildAtlas(env, outId, job, src);
+                if (src) buildAtlas(env, outId, job, src, 1);
                 rec.atlas = job.atlas;
             }
             if (rec.model.usedTexture && !rec.atlas) env.log.warn("shared drawing '" + rec.name + "' is held by no layer and its textures could not be painted: written flat");
@@ -458,7 +472,7 @@ function renderTexturedModel(env, model, outId) {
         var brush = new QBrush(tex);
         brush.setTransform(new QTransform(m.xx * s * sx / tw, -m.xy * s * sy / tw, -m.yx * s * sx / th, m.yy * s * sy / th,
                                           (m.ox + m.yx) * s * sx + env.frameW / 2 * sx, -(m.oy + m.yy) * s * sy + env.frameH / 2 * sy));
-        painter.fillPath(contourPainterPath(env, c, 0, 0, sx, sy), brush);
+        painter.fillPath(contourPainterPath(env, c, 0, 0, sx, sy, env.frameW / 2, env.frameH / 2), brush);
         painted++;
     });
     painter.end();
@@ -1040,11 +1054,28 @@ function rasterizePanel(env, sceneId, panelId, outId, jobs, camKfs) {
     try {
         if (env.hasSession) env.mm.clearCameraMotion(sceneId);
         jobs.forEach(function (job) {
-            var src = renderLayerAlone(env, em, panelId, outId, n, job);
+            // The layer renders with its parent groups visible (a hidden group
+            // hides its members) and with its own and its groups' motion
+            // cleared: tiles are cut at the drawing's untransformed place, the
+            // layer's transform travels in layer_tracks. Clearing is part of
+            // the cancelled undo accumulation; -batch has none, so there the
+            // motion stays and the tiles of an animated layer may miss.
+            var keep = [job.li].concat(ancestorGroups(env, panelId, job.li));
+            if (env.hasSession) {
+                keep.forEach(function (idx) { try { env.mm.clearLayerMotion(panelId, idx); } catch (e) {} });
+            } else if (keep.some(function (idx) { return readLayerKeys(env, panelId, idx, env.sb.getPanelDuration(panelId)).length > 0; })) {
+                warnOnce(env, "batch-motion:" + job.layerName, "layer '" + job.layerName + "' has layer motion that -batch cannot " +
+                         "neutralize for the render; its textures may be cut from the wrong place");
+            }
+            var k = job.kind === "atlas" ? renderScale(env, job) : 1;
+            var src = renderLayerAlone(env, em, panelId, outId, n, job, keep, k);
+            if (src && job.kind === "atlas" && buildAtlas(env, outId, job, src, k) === "retry") {
+                // The zoomed render did not come out as assumed: plain render of the frame.
+                src = renderLayerAlone(env, em, panelId, outId, n, job, keep, 1);
+                if (src) buildAtlas(env, outId, job, src, 1);
+            } else if (src && job.kind === "image") stageImageLayer(env, outId, job, src);
             if (!src) env.log.warn("layer '" + job.layerName + "' (panel " + panelId + ") did not render; " +
                                    (job.kind === "atlas" ? "kept flat" : "exported empty"));
-            else if (job.kind === "atlas") buildAtlas(env, outId, job, src);
-            else stageImageLayer(env, outId, job, src);
         });
     } finally {
         if (env.hasSession) project.cancelUndoRedoAccum();
@@ -1052,14 +1083,45 @@ function rasterizePanel(env, sceneId, panelId, outId, jobs, camKfs) {
     }
 }
 
-// one layer of the panel rendered alone (every other layer hidden) to a PNG
-// of the frame; its path, or null.
-function renderLayerAlone(env, em, panelId, outId, layerCount, job) {
-    var dir = env.stagingDir + "/raster/" + outId + "_" + job.li;
+// The group layers above a layer, innermost first ([] for a top-level layer).
+function ancestorGroups(env, panelId, li) {
+    var out = [], seen = {};
+    var g = env.lm.groupOfLayer(panelId, li);
+    while (typeof g === "number" && g >= 0 && !seen[g]) {
+        seen[g] = true;
+        out.push(g);
+        g = env.lm.groupOfLayer(panelId, g);
+    }
+    return out;
+}
+
+// How far the render of a textured layer zooms out so that all of its
+// textured contours fit: 1 when they sit inside the default frame, else the
+// factor by which the frame must grow, up to MAX_RENDER_SCALE and the
+// MAX_RENDER_PX output limit.
+function renderScale(env, job) {
+    var halfW = env.frameW / 2, halfH = env.frameH / 2, need = 1;
+    job.textured.forEach(function (item) {
+        var bb = item.bb;
+        if (!bb) return;
+        need = Math.max(need, -bb.minX / halfW, bb.maxX / halfW, -bb.minY / halfH, bb.maxY / halfH);
+    });
+    if (need <= 1.001) return 1;
+    var k = Math.min(need, MAX_RENDER_SCALE, MAX_RENDER_PX / env.resW, MAX_RENDER_PX / env.resH);
+    return k > 1.001 ? Math.ceil(k * 100) / 100 : 1;
+}
+
+// One layer of the panel rendered alone (every layer but `keep` hidden) to a
+// PNG, zoomed out by `k` (the image then covers k times the frame at the
+// frame's pixel density); its path, or null.
+function renderLayerAlone(env, em, panelId, outId, layerCount, job, keep, k) {
+    var dir = env.stagingDir + "/raster/" + outId + "_" + job.li + (k > 1 ? "_x" + k : "");
     new Dir(dir).mkdirs();
     var ok = false;
     try {
-        for (var j = 0; j < layerCount; j++) env.lm.setLayerVisible(panelId, j, j === job.li);
+        for (var j = 0; j < layerCount; j++) env.lm.setLayerVisible(panelId, j, keep.indexOf(j) >= 0);
+        em.setZoomFactor(1 / k);
+        em.setExportResolution(Math.round(env.resW * k), Math.round(env.resH * k));
         ok = em.exportToBitmap(dir, "layer", "png");
     } catch (e) {
         env.log.warn("render of layer '" + job.layerName + "' failed: " + e);
@@ -1081,87 +1143,91 @@ function stageImageLayer(env, outId, job, src) {
     env.counts.rasterLayers++;
 }
 
-// Textured strokes (SPEC.md "Textured strokes"): one tile per textured
-// contour cut out of the layer's render (its world bounds clipped to the
-// frame, masked by the contour), shelf-packed into one atlas PNG per layer.
-// `job.atlas` becomes {file, w, h, tiles[k]} (tile k for textured contour
-// k, null where no tile could be cut); any failure leaves it null.
-function buildAtlas(env, outId, job, src) {
+// Textured strokes (SPEC.md "Textured strokes"): the layer's render, cropped
+// to the area its textured contours cover, is the layer's atlas PNG; each
+// textured contour's <pattern> views its own rect of it (the path outline
+// clips the fill). The render covers `k` times the default frame
+// (renderLayerAlone). `job.atlas` becomes {file, w, h, tiles[k]} (tile k for
+// textured contour k, null where it lies outside the render); any failure
+// leaves it null. Returns "retry" when a zoomed render did not come out as
+// expected (the caller renders the plain frame instead), else undefined.
+function buildAtlas(env, outId, job, src, k) {
     var render = new QImage(src);
     if (render.isNull()) {
         env.log.warn("textured layer '" + job.layerName + "' kept flat (render unreadable)");
         return;
     }
     var W = render.width(), H = render.height();
-    var sx = W / env.frameW, sy = H / env.frameH;   // world -> render pixels
-    var halfW = env.frameW / 2, halfH = env.frameH / 2;
-    var area = 0, widest = 0;
-    var tiles = job.textured.map(function (item, k) {
+    if (k > 1 && (Math.abs(W - env.resW * k) > 2 || Math.abs(H - env.resH * k) > 2)) {
+        warnOnce(env, "zoom-size", "Storyboard Pro rendered " + W + "x" + H + " instead of " + Math.round(env.resW * k) + "x" +
+                 Math.round(env.resH * k) + " for a zoomed-out render; art beyond the frame is cut at the frame");
+        return "retry";
+    }
+    var coverW = env.frameW * k, coverH = env.frameH * k;   // world units the render spans
+    var sx = W / coverW, sy = H / coverH;                    // world -> render pixels
+    var halfW = coverW / 2, halfH = coverH / 2;
+    var ux0 = W, uy0 = H, ux1 = 0, uy1 = 0, inked = 0;      // union of the contour rects, render pixels
+    var tiles = job.textured.map(function (item, idx) {
         var bb = item.bb;
         if (!bb) return null;
         var minX = Math.max(bb.minX, -halfW), maxX = Math.min(bb.maxX, halfW);
         var minY = Math.max(bb.minY, -halfH), maxY = Math.min(bb.maxY, halfH);
-        if (!(maxX > minX) || !(maxY > minY)) return null;   // entirely outside the frame
+        if (!(maxX > minX) || !(maxY > minY)) return null;   // entirely outside the render
         var px0 = Math.max(0, Math.floor((minX + halfW) * sx)), py0 = Math.max(0, Math.floor((minY + halfH) * sy));
         var pw = Math.min(W, Math.ceil((maxX + halfW) * sx)) - px0, ph = Math.min(H, Math.ceil((maxY + halfH) * sy)) - py0;
         if (pw <= 0 || ph <= 0) return null;
-        var img;
+        // The flat fallback colour: the contour's own pixels (its rect masked
+        // by its outline) averaged; the masked copy is not kept.
+        var rgba;
         try {
-            img = render.copy(px0, py0, pw, ph);
+            var probe = render.copy(px0, py0, pw, ph);
             var painter = new QPainter();
-            painter.begin(img);
+            painter.begin(probe);
             painter.setCompositionMode(QPainter.CompositionMode_DestinationIn);
             painter.setRenderHint(QPainter.Antialiasing, true);
-            painter.fillPath(contourPainterPath(env, item.contour, px0, py0, sx, sy), new QBrush(new QColor(0, 0, 0, 255)));
+            painter.fillPath(contourPainterPath(env, item.contour, px0, py0, sx, sy, halfW, halfH), new QBrush(new QColor(0, 0, 0, 255)));
             painter.end();
+            rgba = tileMeanColor(probe, contourAreaPixels(env, item.contour, sx, sy));
         } catch (e) {
-            env.log.warn("textured layer '" + job.layerName + "': tile " + k + " failed (" + e + ")");
+            env.log.warn("textured layer '" + job.layerName + "': tile " + idx + " failed (" + e + ")");
             return null;
         }
-        area += pw * ph;
-        if (pw > widest) widest = pw;
-        return { img: img, aw: pw, ah: ph, world: { x: px0 / sx - halfW, y: py0 / sy - halfH, w: pw / sx, h: ph / sy },
-                 rgba: tileMeanColor(img, contourAreaPixels(env, item.contour, sx, sy)) };
+        if (rgba[3] > 0) inked++;
+        if (px0 < ux0) ux0 = px0; if (py0 < uy0) uy0 = py0;
+        if (px0 + pw > ux1) ux1 = px0 + pw; if (py0 + ph > uy1) uy1 = py0 + ph;
+        return { ax: px0, ay: py0, aw: pw, ah: ph, world: { x: px0 / sx - halfW, y: py0 / sy - halfH, w: pw / sx, h: ph / sy },
+                 rgba: rgba };
     });
-    // Shelf packing, tallest first, rows no wider than sqrt(area).
-    var order = [];
-    tiles.forEach(function (t, i) { if (t) order.push(i); });
-    if (!order.length) {
-        env.log.warn("textured layer '" + job.layerName + "' kept flat (no tile inside the frame)");
+    var count = 0;
+    tiles.forEach(function (t) { if (t) count++; });
+    if (k > 1 && count && inked === 0) {
+        // Every contour came out empty: the zoom did not scale the art about
+        // the frame's centre as assumed. Fall back to the plain frame.
+        warnOnce(env, "zoom-blank", "zoomed-out renders come out blank in this Storyboard Pro; art beyond the frame is cut at the frame");
+        return "retry";
+    }
+    if (!count) {
+        warnOnce(env, "flat:" + job.layerName, "textured layer '" + job.layerName + "' kept flat (its strokes lie more than " +
+                 MAX_RENDER_SCALE + " frames out)");
         return;
     }
-    order.sort(function (a, b) { return tiles[b].ah - tiles[a].ah || tiles[b].aw - tiles[a].aw; });
-    var rowLimit = Math.max(widest, Math.min(8192, Math.ceil(Math.sqrt(area))));
-    var cx = 0, cy = 0, shelfH = 0, atlasW = 0;
-    order.forEach(function (i) {
-        var t = tiles[i];
-        if (cx > 0 && cx + t.aw > rowLimit) { cy += shelfH; cx = 0; shelfH = 0; }
-        t.ax = cx; t.ay = cy;
-        cx += t.aw;
-        if (t.ah > shelfH) shelfH = t.ah;
-        if (cx > atlasW) atlasW = cx;
-    });
-    var atlasH = cy + shelfH;
+    var atlasW = ux1 - ux0, atlasH = uy1 - uy0;
+    tiles.forEach(function (t) { if (t) { t.ax -= ux0; t.ay -= uy0; } });
     var fileName = outId + "_" + job.layerId + "_pencil.png";
-    var atlasImg = new QImage(atlasW, atlasH, QImage.Format_ARGB32_Premultiplied);
-    atlasImg.fill(0);
-    var ap = new QPainter();
-    ap.begin(atlasImg);
-    ap.setCompositionMode(QPainter.CompositionMode_Source);
-    order.forEach(function (i) { ap.drawImage(tiles[i].ax, tiles[i].ay, tiles[i].img); tiles[i].img = null; });
-    ap.end();
-    if (!atlasImg.save(env.stagingDir + "/images/" + fileName, "PNG")) {
+    var atlasImg = render.copy(ux0, uy0, atlasW, atlasH);
+    if (atlasImg.isNull() || !atlasImg.save(env.stagingDir + "/images/" + fileName, "PNG")) {
         env.log.warn("textured layer '" + job.layerName + "' kept flat (atlas not saved)");
         return;
     }
     job.atlas = { file: fileName, w: atlasW, h: atlasH, tiles: tiles };
-    env.counts.texturedStrokes += order.length;
+    env.counts.texturedStrokes += count;
+    env.counts.atlasPixels += atlasW * atlasH;
 }
 
 // The contour (drawing units, y up) as a QPainterPath in tile-local render
-// pixels (holes as further subpaths, odd-even fill).
-function contourPainterPath(env, contour, px0, py0, sx, sy) {
-    var halfW = env.frameW / 2, halfH = env.frameH / 2;
+// pixels (holes as further subpaths, odd-even fill). `halfW`/`halfH`: half
+// the world extent the render covers.
+function contourPainterPath(env, contour, px0, py0, sx, sy, halfW, halfH) {
     var path = new QPainterPath();
     path.setFillRule(Qt.OddEvenFill);
     function pix(p) {
@@ -1196,7 +1262,8 @@ function contourAreaPixels(env, contour, sx, sy) {
 
 // The tile's mean colour over a sample grid, as [r, g, b, a] in 0..1 — the
 // flat fallback a reader without pattern support draws: the ink's mean
-// colour at the mean alpha over the contour's area (`areaPx`).
+// colour at the mean alpha over the contour's area (`areaPx`). A tile
+// without any ink is [0, 0, 0, 0] (invisible, like the tile itself).
 function tileMeanColor(img, areaPx) {
     var w = img.width(), h = img.height();
     var n = 0, r = 0, g = 0, b = 0, a = 0;
@@ -1213,7 +1280,7 @@ function tileMeanColor(img, areaPx) {
             a += pa;
         }
     }
-    if (n === 0 || a <= 0) return [0, 0, 0, 1];
+    if (n === 0 || a <= 0) return [0, 0, 0, 0];
     var sampled = n * stepX * stepY;   // tile pixels the grid stands for
     var cover = (a * stepX * stepY) / (areaPx > 0 ? Math.min(areaPx, sampled) : sampled);
     var opaque = a / 255;   // sum of alphas / 255 = "opaque pixel count"
@@ -1340,7 +1407,8 @@ function exportSummary(env) {
     return "Exported " + c.scenes + " scene(s), " + c.panels + " panel(s), " + (c.layers - c.rasterLayers) + " vector layer(s)" +
            (c.rasterLayers ? " and " + c.rasterLayers + " image layer(s)" : "") +
            (env.shared.list.length ? ", " + env.shared.list.length + " shared drawing(s)" : "") +
-           (c.atlasLayers ? ", " + c.texturedStrokes + " textured stroke(s)" : "") +
+           (c.atlasLayers ? ", " + c.texturedStrokes + " textured stroke(s) in " + c.atlasLayers + " atlas(es) totalling " +
+                            (c.atlasPixels / 1048576).toFixed(1) + " megapixel(s)" : "") +
            (c.audioClips ? ", " + c.audioClips + " audio clip(s)" : "") +
            " to\n" + env.zipPath + ".";
 }
