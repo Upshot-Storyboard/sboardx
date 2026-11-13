@@ -1,51 +1,41 @@
 # sboardx
 
-The open storyboard package format. A `.sboardx` file is an uncompressed zip
-of JSON (structure, timing, audio, camera) plus one plain SVG per layer of
-art. Anything that can unzip a file can read it, and the SVGs open in any
-vector tool.
+The storyboard file format of [Upshot Storyboard](https://www.upshotstoryboard.com/).
+A `.sboardx` file is an uncompressed zip of JSON (panels, timing, camera,
+audio) plus one plain SVG per layer of art, so anything that can unzip a
+file can read it and the SVGs open in any vector tool.
 
-sboardx was born while building [Upshot Storyboard](https://www.upshotstoryboard.com/):
-the app needed a project file that other tools could open too, so its format
-was made open instead of proprietary. Upshot Storyboard writes and reads it
-natively, and this repo provides experimental Toon Boom Storyboard Pro scripts
-in [`toon-boom/`](toon-boom/). This repo is the format's home: the spec, a
-browser reader, the Toon Boom bridge, sample files and a few scripts.
+This repo holds the spec, a browser reader, Toon Boom Storyboard Pro
+scripts, sample files, a few Python scripts and a JSON Schema of the
+texture file (`schema/`).
 
 ## Open a .sboardx
 
 - **In the browser**: open [`reader/index.html`](reader/index.html) and drop
-  the file on it. Panels, layers, audio and camera moves play back.
-- **With any zip tool**: `unzip board.sboardx`, then open `panels/*/art/*.svg`
-  in Illustrator, Inkscape, Figma, or a browser.
-- **In Toon Boom Storyboard Pro 24+**: install the scripts in
+  the file on it.
+- **With any zip tool**: `unzip board.sboardx`, then open
+  `panels/*/art/*.svg` in Illustrator, Inkscape, Figma or a browser.
+- **In Toon Boom Storyboard Pro**: install the scripts in
   [`toon-boom/`](toon-boom/README.md) and run `TB_ImportSboardx`.
-- **From code**: it's `zipfile` + `json`. See [`examples/python/`](examples/python/).
+- **From code**: it's `zipfile` + `json`. See
+  [`examples/python/`](examples/python/) (run the scripts with `uv run`).
 
 ## Layout at a glance
 
 ```
-project.json                 format version, name, frame + resolution, fps
+project.json                 format version, name, frame, resolution, fps
 sequence.json                panel order, scenes, camera keyframes
 panels/<id>/panel.json       code, shot, duration, note, dialogue
-panels/<id>/layers.json      layer stack (bottom to top), image layers, blur
-panels/<id>/art/<layer>.svg  the art, one SVG per layer, world coordinates
-audio/clips.json + audio/*   clips, tracks, embedded audio files
-images/*                     embedded images for image layers
+panels/<id>/layers.json      layer stack (bottom to top)
+panels/<id>/art/<layer>.svg  the art, one SVG per layer
+panels/<id>/art/<layer>.texture.json
+                             a textured layer's texture
+audio/clips.json + audio/*   audio clips and files
+images/*                     image layers and texture pages
 ```
 
-Full details: [SPEC.md](SPEC.md). Current version: **1.1** (readers also
-accept 1.0 files).
-
-## Repo contents
-
-| Path | What |
-|---|---|
-| `SPEC.md` | The format specification |
-| `reader/` | Single-file web reader (no build step) |
-| `toon-boom/` | Storyboard Pro import/export scripts + round-trip test harness |
-| `samples/` | Sample archives |
-| `examples/python/` | `list_panels.py`, `extract_art.py`, `validate.py` (stdlib only) |
+Details: [SPEC.md](SPEC.md). Current version: **1.2** (1.0 and 1.1 files
+still read). Changes: [CHANGELOG.md](CHANGELOG.md).
 
 ## Contributing
 

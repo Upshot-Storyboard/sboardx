@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sboardx.format/schema/1.2/texture.schema.json",
+  "title": "sboardx 1.2 texture file",
+  "description": "A layer's (or shared drawing's) texture file. See SPEC.md, \"Textured strokes (1.2)\". Checks the shape of each value only; validate.py checks the rest (cells inside the grid, views inside the atlas, ids that match a path).",
+  "type": "object",
+  "required": ["atlas_size", "cell_size", "pages", "cells", "paths"],
+  "properties": {
+    "atlas_size": {
+      "description": "[W, H]: the atlas size in pixels.",
+      "type": "array",
+      "prefixItems": [
+        { "$ref": "#/$defs/integer", "minimum": 1 },
+        { "$ref": "#/$defs/integer", "minimum": 1 }
+      ],
+      "items": false,
+      "minItems": 2
+    },
+    "cell_size": {
+      "description": "S, the cell size in pixels: a power of two from 64 to 1024. Writers use 256.",
+      "enum": [64, 128, 256, 512, 1024]
+    },
+    "rect": {
+      "description": "Optional. [x, y, w, h]: where the whole atlas sits in the world, for path entries without their own rect.",
+      "$ref": "#/$defs/rect"
+    },
+    "pages": {
+      "description": "The page PNGs, as archive entry names (images/<name>.png).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/pageName" }
+    },
+    "cells": {
+      "description": "The stored cells.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/cell" }
+    },
+    "paths": {
+      "description": "One entry per textured path.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/path" }
+    }
+  },
+  "$defs": {
+    "integer": {
+      "description": "A whole number from 0 to 2^20.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1048576
+    },
+    "rect": {
+      "description": "[x, y, w, h] in world units, w and h above 0.",
+      "type": "array",
+      "prefixItems": [
+        { "type": "number" },
+        { "type": "number" },
+        { "type": "number", "exclusiveMinimum": 0 },
+        { "type": "number", "exclusiveMinimum": 0 }
+      ],
+      "items": false,
+      "minItems": 4
+    },
+    "pageName": {
+      "description": "A page's archive entry name: images/<name>.png.",
+      "type": "string",
+      "pattern": "^images/[A-Za-z0-9_-]+\\.png(?![\\s\\S])"
+    },
+    "cell": {
+      "description": "[col, row, page, slot_col, slot_row]: the cell's pixels are the S x S square at (slot_col*S, slot_row*S) of pages[page].",
+      "type": "array",
+      "prefixItems": [
+        { "$ref": "#/$defs/integer" },
+        { "$ref": "#/$defs/integer" },
+        { "$ref": "#/$defs/integer" },
+        { "$ref": "#/$defs/integer" },
+        { "$ref": "#/$defs/integer" }
+      ],
+      "items": false,
+      "minItems": 5
+    },
+    "path": {
+      "description": "A textured path: id, view, and rect unless the texture has its own rect.",
+      "type": "object",
+      "required": ["id", "view"],
+      "properties": {
+        "id": {
+          "description": "The id of a <path> in the art SVG.",
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_-]*(?![\\s\\S])"
+        },
+        "view": {
+          "description": "[ax, ay, aw, ah]: the atlas pixels the path shows.",
+          "type": "array",
+          "prefixItems": [
+            { "$ref": "#/$defs/integer" },
+            { "$ref": "#/$defs/integer" },
+            { "$ref": "#/$defs/integer", "minimum": 1 },
+            { "$ref": "#/$defs/integer", "minimum": 1 }
+          ],
+          "items": false,
+          "minItems": 4
+        },
+        "rect": {
+          "description": "[x, y, w, h]: where the view is drawn, in world units.",
+          "$ref": "#/$defs/rect"
+        }
+      }
+    }
+  }
+}

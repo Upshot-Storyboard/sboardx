@@ -1,11 +1,8 @@
-// TB_MergeSboardx.js — "Update from .sboardx": the 3-way, panel-level merge
-// of an .sboardx archive into the open Storyboard Pro project (the
-// counterpart of Upshot's "Update from .sboardx…"). Entry points only: the
-// implementation is sboardx_merge.js (with sboardx_common.js,
-// sboardx_import.js and sboardx_export.js), loaded via require() so the
-// Scripts Manager lists nothing but these functions. Keep all seven files
-// in the same folder. See README.md ("Merge").
-// Batch (no dialog; the options decide):
+// TB_MergeSboardx.js: "Update from .sboardx", a 3-way panel-level merge of
+// a .sboardx into the open project. Entry points only, the code is in
+// sboardx_merge.js (require() keeps the Scripts Manager list clean). Keep
+// all seven files together. See README.md ("Merge").
+// Batch (no dialog, the options decide):
 //   StoryboardPro -scene p.sboard -compile TB_MergeSboardx.js
 //     -script "TB_MergeSboardxFromFile('C:/in/file.sboardx', true, {takeTheirs: 'all'})"
 

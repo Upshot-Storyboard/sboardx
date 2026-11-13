@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Zero Eleven Labs Inc.
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
 """Write every layer SVG (and embedded image) out of a .sboardx.
 
-usage: extract_art.py FILE.sboardx OUT_DIR
+usage: uv run extract_art.py FILE.sboardx OUT_DIR
 Files land as OUT_DIR/<panel code>/<layer name>.svg, bottom layer first.
 """
 import json

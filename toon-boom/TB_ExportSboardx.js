@@ -1,8 +1,6 @@
-// TB_ExportSboardx.js — writes the open Storyboard Pro project as a .sboardx
-// (1.1) archive. Entry points only: the implementation is sboardx_export.js
-// (with sboardx_common.js), loaded via require() so the Scripts Manager
-// lists nothing but these functions. Keep all seven files in the same
-// folder. See README.md.
+// TB_ExportSboardx.js: exports the open project as a .sboardx (1.2).
+// Entry points only, the code is in sboardx_export.js (require() keeps the
+// Scripts Manager list clean). Keep all seven files together. See README.md.
 // Batch: StoryboardPro -scene p.sboard -batch -compile TB_ExportSboardx.js
 //        -script "TB_ExportSboardxToFile('C:/out/file.sboardx', true)"
 

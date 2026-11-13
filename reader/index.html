@@ -1,16 +1,15 @@
 <!DOCTYPE html>
 <!-- SPDX-License-Identifier: Apache-2.0
      Copyright 2026 Zero Eleven Labs Inc.
-     sboardx web reader — https://github.com/Upshot-Storyboard/sboardx -->
+     sboardx web reader: https://github.com/Upshot-Storyboard/sboardx -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="light">
   <title>sboardx reader</title>
-  <!-- Same faces as the Upshot website; the stacks in --font-* fall back to
-       system fonts when offline. The favicon is injected by the script from
-       the inline #upshot-icon symbol below (one copy of the artwork). -->
+  <!-- Same fonts as the Upshot website, system fonts when offline. The
+       favicon is built by the script from #upshot-icon below. -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
@@ -64,8 +63,7 @@
     body.dragging #drop-ring { opacity: 1; }
 
     /* ── App shell ── */
-    /* The timeline row height (--tl-h) is set from JS once the track count
-       is known; compact landscape overrides the template and drops it. */
+    /* --tl-h is set from JS once the track count is known. */
     #app { display: none; height: 100%; grid-template-rows: 44px 1fr var(--tl-h);
       grid-template-columns: 148px 1fr 220px;
       grid-template-areas: "hd hd hd" "strip canvas meta" "tl tl tl"; }
@@ -80,6 +78,7 @@
     #dropzone .brand { width: 56px; height: 56px; }
     #proj-title { font-family: var(--font-head); font-weight: 600; font-size: 13px; }
     #proj-sub   { font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+    #proj-sub .warn { color: #b45309; font-weight: 600; cursor: help; }
     .hd-space { flex: 1; }
     /* Prev / next: shown only in the compact layouts (no strip to click). */
     .hd-nav { display: none; gap: 4px; }
@@ -114,19 +113,15 @@
     /* Canvas */
     #canvas-area { grid-area: canvas; display: flex; align-items: center;
       justify-content: center; padding: 16px; background: var(--bg-canvas); overflow: hidden; }
-    /* White wrap background: with wide shots (z < 1) the framed region is
-       larger than the artwork's paper rect — paper extends beyond it. */
+    /* White, since wide shots (z < 1) frame more than the paper rect. */
     #canvas-wrap { position: relative; max-width: 100%; max-height: 100%;
       background: #fff; border-radius: 8px; overflow: hidden;
       box-shadow: 0 0 0 1px var(--line), 0 12px 32px rgba(13,26,44,0.10); }
     #canvas-wrap svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-    /* Inner wrapper that receives the scene's camera transform during
-       playback (pan / zoom / rotate, sampled at the playhead). */
+    /* Gets the camera transform. */
     #cam-content { position: absolute; inset: 0; will-change: transform; }
-    /* Overflow art (stroke geometry outside the 0..960/0..540 frame) must
-       survive the SVG's own viewport clip so camera pans can reveal it;
-       #canvas-wrap's overflow:hidden remains the frame clip. Thumbnails
-       (.thumb-svg) keep the default viewBox clipping. */
+    /* Let art outside the frame show when the camera pans; #canvas-wrap
+       still clips to the frame. Thumbnails keep the viewBox clip. */
     #cam-content svg { overflow: visible; }
 
     /* Meta */
@@ -147,8 +142,7 @@
     #tl-scroll { overflow-x: auto; overflow-y: hidden; height: 100%; cursor: crosshair;
       -webkit-overflow-scrolling: touch; touch-action: pan-x; }
     #tl-inner  { position: relative; height: 100%; }
-    /* Scene strip: one colored band per scene + its camera keyframe
-       diamonds. Hidden (height 0) for files without scenes. */
+    /* Scene bands and camera keyframes. Empty for files without scenes. */
     .tl-scenes { position: absolute; top: 0; left: 0; height: 22px; }
     .sblock { position: absolute; top: 3px; height: 16px; border-radius: 3px;
       font-size: 9px; font-weight: 600; letter-spacing: .04em; overflow: hidden;
@@ -181,9 +175,8 @@
       border: 5px solid transparent; border-top: 6px solid var(--accent); }
 
     /* ── Compact layouts (phones) ──
-       Portrait: header, canvas, timeline. Landscape: header, canvas and a
-       notes-only meta rail (the timeline would not fit). body.compact is
-       mirrored from these queries in JS for the swipe handler. */
+       Portrait: header, canvas, timeline. Landscape: header, canvas, notes
+       rail. JS mirrors these queries onto body.compact. */
     @media (max-width: 720px) and (orientation: portrait) {
       #app.on { grid-template-columns: 1fr; grid-template-areas: "hd" "canvas" "tl"; }
       #strip, #meta, #proj-sub { display: none; }
@@ -210,8 +203,7 @@
 </head>
 <body>
 
-<!-- Upshot mark (the website's app/icon.svg), referenced by the brand
-     <use> elements and serialised into the favicon at startup. -->
+<!-- Upshot mark, used by the brand <use> elements and the favicon. -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <symbol id="upshot-icon" viewBox="0 0 1024 1024">
   <rect width="1024" height="1024" rx="229" fill="#f5f8fc"/>
@@ -309,8 +301,25 @@ const S = {
   raf: null,
 };
 
-// Scene tag colors: the app's five accent swatches, by scene index mod 5.
+// Scene colors, by scene index mod 5.
 const SCENE_PALETTE = ['#2a6fdb', '#7a5af0', '#19b3a6', '#f0772e', '#e0455e'];
+
+const READ_VERSIONS = ['1.0', '1.1', '1.2'];
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const SBX_NS = 'https://sboardx.format/ns/1.0';
+// Texture file limits and grammars (SPEC "Textured strokes (1.2)").
+const CELL_SIZE_MIN = 64, CELL_SIZE_MAX = 1024;
+const INT_MAX = 1048576;
+const LINK_RE = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/;
+const ID_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+const PAGE_NAME_RE = /^images\/[A-Za-z0-9_-]+\.png$/;
+const ASCII_RE = /^[\x00-\x7f]*$/;
+// Max composed texture size. iOS Safari caps canvases at 16 MP.
+const COMPOSE_MAX_PIXELS = 16 * 1024 * 1024;
+// Extra texels kept around a rect-less view, for the cubic filter's reach.
+const COMPOSE_MARGIN = 2;
+// Max page side.
+const PAGE_MAX = 2048;
 
 // ── Favicon ──────────────────────────────────────────────────────────────────
 // Built from the inline #upshot-icon symbol so the artwork ships once.
@@ -326,8 +335,7 @@ const SCENE_PALETTE = ['#2a6fdb', '#7a5af0', '#19b3a6', '#f0772e', '#e0455e'];
 }
 
 // ── Layout mode ──────────────────────────────────────────────────────────────
-// Mirrors the compact media queries in the stylesheet onto body.compact so
-// touch navigation only engages when the strip/timeline are hidden.
+// body.compact mirrors the compact media queries, for swipe navigation.
 const COMPACT_QUERIES = [
   matchMedia('(max-width: 720px) and (orientation: portrait)'),
   matchMedia('(max-height: 520px) and (orientation: landscape)'),
@@ -351,10 +359,9 @@ document.getElementById('file-input').addEventListener('change', e => {
   if (e.target.files[0]) loadFile(e.target.files[0]);
 });
 
-// Samples: a `samples.json` next to this document lists .sboardx files to
-// offer — `{"files": [{"file": "Demo.sboardx", "name": "Demo", "credit": "…"}]}`,
-// paths relative to the manifest. The website ships one under /reader/; a
-// local copy with no manifest simply shows no list.
+// Optional samples.json next to this page:
+// {"files": [{"file": "Demo.sboardx", "name": "Demo", "credit": "…"}]},
+// paths relative to it. No manifest, no list.
 (async () => {
   let files;
   try {
@@ -402,25 +409,34 @@ async function loadFile(file) {
   S.project  = JSON.parse(await zip.file('project.json').async('string'));
   S.sequence = JSON.parse(await zip.file('sequence.json').async('string'));
 
-  // sboardx 1.0 and 1.1 (SPEC.md). The sboardx:* SVG attributes are
-  // render-neutral here: paths are DOM-imported verbatim, fill-opacity and
-  // gradient fills render natively, and the attributes are simply ignored
-  // (a 1.1 pencil layer arrives as a hidden source plus visible derived
-  // copies, so honouring `visible` is all the pencil needs). The optional
-  // audio track keys (per-clip `track`, root `tracks` mute list in
-  // audio/clips.json) are honored: one timeline row per track, muted tracks
-  // dimmed and silenced. The optional per-layer `blur` key (layers.json;
-  // Gaussian sigma in world units) is applied in compositeSVG through an
-  // SVG <filter>.
-  if (S.project.sboardx !== '1.0' && S.project.sboardx !== '1.1') {
-    alert(`This archive uses sboardx format "${S.project.sboardx || 'unknown'}"; ` +
-          'this reader requires 1.0 or 1.1.');
+  // Reads 1.0 to 1.2. Paths are DOM-imported as is, so sboardx:* attributes
+  // mostly don't matter here. Exceptions: tiled texture markers on a
+  // <pattern>, and sboardx:rgba as a pattern fill's fallback. A 1.1 pencil
+  // layer is a hidden source plus visible derived copies, so honouring
+  // `visible` is enough.
+  const version = S.project.sboardx;
+  if (Object.prototype.hasOwnProperty.call(S.project, 'x-the-storyboard-app')) {
+    alert('This archive was written by a pre-release build of the app (its project.json ' +
+          'carries "x-the-storyboard-app"). Re-export it from a current app.');
+    return;
+  }
+  if (!READ_VERSIONS.includes(version)) {
+    const m = /^(\d+)\.(\d+)$/.exec(typeof version === 'string' ? version : '');
+    const newer = m && (+m[1] > 1 || (+m[1] === 1 && +m[2] > 2));
+    alert(newer
+      ? `This archive uses sboardx ${version}, newer than this reader (1.0 to 1.2). ` +
+        'Open it in the latest reader.'
+      : `This archive uses sboardx format "${version || 'unknown'}"; ` +
+        'this reader reads 1.0, 1.1 and 1.2.');
     return;
   }
 
   // Load panels
   S.panels = [];
+  S.warnings = [];
   S.imageUrls = new Map();   // images/<file> -> blob URL (deduped across layers)
+  S.textures = new Map();    // `${panelID}/${layerID}` -> composed texture
+  const parser = new DOMParser();
   for (const id of S.sequence.panels) {
     const meta   = JSON.parse(await zip.file(`panels/${id}/panel.json`).async('string'));
     const layers = JSON.parse(await zip.file(`panels/${id}/layers.json`).async('string'));
@@ -431,19 +447,20 @@ async function loadFile(file) {
       if (entry) {
         const text = await entry.async('string');
         svgText.set(layer.id, text);
-        // Textured strokes (1.1): a <pattern><image href="../../../images/…">
-        // names an atlas entry; read it once into a blob URL like a raster
-        // layer's image (the href is relative to panels/<id>/art/).
-        for (const m of text.matchAll(/<image\b[^>]*?\b(?:xlink:)?href="(?:\.\.\/)+(images\/[^"]+)"/g)) {
-          const file = m[1];
-          if (S.imageUrls.has(file)) continue;
-          const atlasEntry = zip.file(file);
-          if (!atlasEntry) continue;
-          const buf = await atlasEntry.async('arraybuffer');
-          S.imageUrls.set(file, URL.createObjectURL(new Blob([buf], { type: imageMimeFor(file) })));
+        let doc = null;
+        const parsed = () => doc || (doc = parser.parseFromString(text, 'image/svg+xml'));
+        // 1.1 textures: load each pattern's atlas image into a blob URL.
+        if (text.includes('<pattern')) await loadPatternImages(zip, parsed(), path);
+        // 1.2 textures: compose now, applied in compositeSVG.
+        if (!layer.image && Object.prototype.hasOwnProperty.call(layer, 'texture')) {
+          // The text rule needs the raw text, BOM included.
+          const raw = new TextDecoder('utf-8', { ignoreBOM: true }).decode(await entry.async('uint8array'));
+          const tex = await loadTexture(zip, `panels/${id}/`, layer.texture, raw,
+                                        `panels/${id}/layers.json layer ${layer.id}`);
+          if (tex) S.textures.set(`${id}/${layer.id}`, tex);
         }
       }
-      // Raster layer: read the embedded image once into a blob URL.
+      // Raster layer image, once per file.
       if (layer.image && layer.image.file && !S.imageUrls.has(layer.image.file)) {
         const imgEntry = zip.file(layer.image.file);
         if (imgEntry) {
@@ -456,10 +473,8 @@ async function loadFile(file) {
     S.panels.push({ id, meta, layers: layers.layers, svgText });
   }
 
-  // Load audio. clips.json may carry the optional track keys: a per-clip
-  // `track` (absent = 0) and a root `tracks` array of {muted} (absent =
-  // one unmuted track). Clips on different tracks may overlap and
-  // play together; muted tracks are silenced here.
+  // Audio. Optional `track` per clip (default 0) and root `tracks` [{muted}]
+  // (default: one unmuted track).
   S.clips = [];
   S.tracks = [{ muted: false }];
   const clipsFile = zip.file('audio/clips.json');
@@ -486,20 +501,16 @@ async function loadFile(file) {
   S.currentIdx = 0;
   S.playhead = 0;
 
-  // Show the app BEFORE building the UI: renderPanel sizes the canvas from
-  // the live layout (clientWidth/Height), which are 0 while #app is still
-  // display:none — the first panel would collapse to a 0×0 (dark) canvas
-  // until the next panel switch re-rendered it.
+  // Show #app before building the UI. renderPanel sizes from clientWidth,
+  // which is 0 while it's display:none.
   document.getElementById('dropzone').style.display = 'none';
   document.getElementById('app').classList.add('on');
   buildScenes();
   buildUI();
 }
 
-// Keep the canvas sized to its area: window resizes, device rotation, the
-// compact layouts swapping columns, and the embedding iframe changing size
-// all end up here (also covers any load-order path where the first layout
-// pass wasn't live yet).
+// Re-fit the canvas whenever its area changes (resize, rotation, layout
+// switch, iframe resize).
 {
   const refit = () => { if (S.panels.length) renderPanel(S.currentIdx); };
   if (typeof ResizeObserver === 'function') {
@@ -511,20 +522,16 @@ async function loadFile(file) {
 
 // ── Scenes ───────────────────────────────────────────────────────────────────
 //
-// sequence.json's `scenes` groups contiguous panels and carries each scene's
-// camera move: keyframes {t, z, cx, cy, rot} with `t` in seconds local to the
-// scene (0 = the scene's first panel's start). A file without scenes (not
-// something the app writes) gets a single synthetic one (no camera, not
-// drawn in the strip) so the rest of the reader has one code path.
+// Scenes group contiguous panels and carry the camera keyframes
+// {t, z, cx, cy, rot}, t local to the scene. A file without scenes gets one
+// synthetic scene (no camera, not drawn) so there's a single code path.
 function buildScenes() {
   const raw = (S.sequence.scenes || []).filter(sc => sc && Array.isArray(sc.panels));
   const byPanel = new Map();
   raw.forEach(sc => sc.panels.forEach(pid => byPanel.set(pid, sc)));
 
-  // One built scene per contiguous run of panels sharing a raw scene. For
-  // files without scenes every panel maps to null, producing exactly one
-  // synthetic run. A panel missing from every scene list adopts its
-  // neighbour's scene (first panel: the first raw scene, if any).
+  // One scene per contiguous run. A panel no scene lists joins the previous
+  // panel's scene (or the first scene, for the first panel).
   S.scenes = [];
   let t = 0;
   let prevRaw;
@@ -555,10 +562,7 @@ function buildScenes() {
     t += panel.meta.dur;
   }
 
-  // Display codes: panel.json `code` verbatim (SPEC: "shown verbatim by
-  // readers" — the app resolves names like `10-1` or `CHASE-Crash` and
-  // writes the result). Only a panel with no code falls back to a derived
-  // "{sceneNumber}-{letter}", letter restarting per scene.
+  // Show `code` as is. Without one, fall back to "{scene}-{letter}".
   const counters = new Map();
   S.panels.forEach(p => {
     if (p.meta.code) { p.dispCode = p.meta.code; return; }
@@ -573,11 +577,10 @@ function buildScenes() {
   });
 }
 
-// ── Camera move interpolation (mirror of the app's sb::cam::poseAt) ─────────
+// ── Camera move interpolation ────────────────────────────────────────────────
 //
-// Hold at both ends (a single keyframe is a static transform for the whole
-// scene); between keyframes: smoothstep easing, geometric zoom (lerp of
-// ln z), linear pan, shortest-arc rotation (degrees).
+// Hold at both ends. In between: smoothstep, zoom lerped in log space, linear
+// pan, shortest-arc rotation in degrees.
 function wrapDeg(d) {
   let x = ((d + 180) % 360 + 360) % 360;
   return x - 180;
@@ -602,13 +605,11 @@ function camPoseAt(kfs, t) {
   };
 }
 
-// ── Layer animation (mirror of the app's sb::anim) ──────────────────────────
+// ── Layer animation ──────────────────────────────────────────────────────────
 //
-// sequence.json's optional `layer_tracks`: per scene, keyframed poses applied
-// by NAME — kind "layer" to every layer named like the track, kind "group"
-// to every layer whose `group` is the track's name. Same easing/hold rules
-// as the camera; uniform scale interpolates geometrically. Tracks with an
-// unknown kind are skipped.
+// `layer_tracks` match layers by name: kind "layer" by layer name, kind
+// "group" by the layer's `group`. Same easing as the camera, scale lerped in
+// log space. Unknown kinds are skipped.
 function buildLayerTracks(rawScene) {
   if (!rawScene || !Array.isArray(rawScene.layer_tracks)) return [];
   const out = [];
@@ -654,8 +655,7 @@ function layerPoseAt(kfs, t) {
   };
 }
 
-// The pose's world affine p' = c + T + S(s)·R(rot)·(p − c) as an SVG
-// matrix(a b c d e f) — the same scalar layout as image transforms.
+// p' = c + T + S(s)·R(rot)·(p - c) as an SVG matrix().
 function layerPoseMatrix(pose, px, py) {
   const r = pose.rot * Math.PI / 180;
   const a = pose.s * Math.cos(r), b = pose.s * Math.sin(r);
@@ -665,9 +665,8 @@ function layerPoseMatrix(pose, px, py) {
   return `matrix(${a.toFixed(6)} ${b.toFixed(6)} ${c.toFixed(6)} ${d.toFixed(6)} ${e.toFixed(4)} ${f.toFixed(4)})`;
 }
 
-// Writes a layer wrapper's transform/opacity for scene-local time t: the
-// layer's own track first, then its group's (SVG applies the left matrix
-// last, so the group matrix goes first in the attribute).
+// Own track applies first, then the group's. SVG applies the leftmost
+// matrix last, so the group's goes first.
 function poseLayerNode(el, layer, scene, t) {
   let transform = '';
   let opacity = 1;
@@ -688,8 +687,7 @@ function poseLayerNode(el, layer, scene, t) {
   if (opacity !== 1) el.setAttribute('opacity', opacity.toFixed(4)); else el.removeAttribute('opacity');
 }
 
-// Re-poses the live composite's layer wrappers at the playhead (the
-// per-tick sibling of applyCamera).
+// Re-pose the live layer wrappers at the playhead.
 function applyLayerPoses() {
   const panel = S.animPanel;
   if (!panel || !S.animNodes || !panel.scene) return;
@@ -697,13 +695,9 @@ function applyLayerPoses() {
   for (const { el, layer } of S.animNodes) poseLayerNode(el, layer, panel.scene, t);
 }
 
-// Applies the current panel's scene camera (sampled at the playhead) to the
-// canvas content. Pose cx/cy are WORLD coordinates (frame center = origin):
-// the CSS chain equals the world affine
-//   p' = S(z)·R(−rot)·(p − c)
-// with transform-origin o = c + (w/2, h/2) (the framed center in element
-// coordinates) and translate d = −c, both as percentages of the
-// canvas-sized element.
+// Camera at the playhead. cx/cy are world coords (origin at frame center).
+// The CSS below is p' = S(z)·R(-rot)·(p - c), with origin c + (w/2, h/2)
+// and translate -c, as percentages.
 function applyCamera() {
   const el = document.getElementById('cam-content');
   const panel = S.panels[S.currentIdx];
@@ -728,7 +722,7 @@ function camSummary(kfs) {
   if (kfs.length < 2) return null;
   const a = kfs[0], b = kfs[kfs.length - 1];
   const dz = b.z - a.z;
-  // cx/cy are world units; "a real pan" = more than 2% of the frame width.
+  // A pan counts if it's over 2% of the frame width.
   const pan = Math.hypot(b.cx - a.cx, b.cy - a.cy) > 0.02 * S.project.canvas.width;
   const rot = Math.abs((b.rot || 0) - (a.rot || 0)) > 1;
   let m;
@@ -751,6 +745,669 @@ function imageMimeFor(filename) {
            gif:'image/gif', webp:'image/webp' }[ext] || 'image/*';
 }
 
+// ── Textured strokes (SPEC "Textured strokes (1.2)") ─────────────────────────
+//
+// At load, each layer's texture file is checked and its cells composed into
+// one image: the whole atlas if it fits COMPOSE_MAX_PIXELS, else one image
+// per path. Pages are decoded one at a time. Damage is a header warning and
+// the path just draws its flat fallback.
+//
+// compositeSVG then gives each textured path a 1.1-style single-image
+// <pattern> over that image. Never one image per cell: browsers show seams.
+//
+// 1.1 single-image patterns draw natively. A tiled texture pattern is damage
+// and draws flat in its sboardx:rgba colour. Other patterns draw flat.
+//
+// Shared drawings aren't drawn (the holder layer carries their art and its
+// own texture file), so their texture files aren't read.
+
+// Something not drawn the way its writer meant.
+function warn(msg) {
+  console.warn('sboardx: ' + msg);
+  S.warnings.push(msg);
+}
+
+// sboardx:* attribute, namespaced or by literal name.
+function sbAttr(el, name) {
+  return el.getAttributeNS(SBX_NS, name) || el.getAttribute('sboardx:' + name);
+}
+
+function imageHref(img) {
+  return img.getAttribute('href') || img.getAttribute('xlink:href');
+}
+
+// "../../../images/x.png" (relative to the art SVG) -> "images/x.png".
+function archiveImagePath(href) {
+  const m = /^(?:\.\.\/)+(images\/.+)$/.exec(href || '');
+  return m ? m[1] : null;
+}
+
+// Integer in [lo, hi]. 64.0 counts as 64.
+function isInt(v, lo, hi) {
+  return typeof v === 'number' && v >= lo && v <= hi && v === Math.floor(v);
+}
+
+// [x, y, w, h], numbers, w > 0, h > 0.
+function isRect(v) {
+  return Array.isArray(v) && v.length === 4 && v.every(n => typeof n === 'number') && v[2] > 0 && v[3] > 0;
+}
+
+// The link grammar.
+function linkOk(link) {
+  return LINK_RE.test(link) && link.endsWith('.json') && link.split('/').every(s => s !== '.' && s !== '..');
+}
+
+// Texture file bytes under the content rule -> {value} or {error}.
+function parseTextureBytes(bytes) {
+  let depth = 0, inString = false, escaped = false;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (!(b === 9 || b === 10 || b === 13 || (b >= 0x20 && b <= 0x7e)))
+      return { error: `is not ASCII (a BOM or a non-ASCII byte, 0x${b.toString(16)} at ${i})` };
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (b === 0x5c) escaped = true;
+      else if (b === 0x22) inString = false;
+    } else if (b === 0x22) {
+      inString = true;
+    } else if (b === 0x5b || b === 0x7b) {
+      if (++depth > 64) return { error: 'is nested deeper than 64 (arrays and objects)' };
+    } else if (b === 0x5d || b === 0x7d) {
+      --depth;
+    }
+  }
+  let text = '';
+  for (let i = 0; i < bytes.length; i += 8192) text += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  let value;
+  try { value = JSON.parse(text); } catch (e) { return { error: `is not JSON (${e.message})` }; }
+  const stack = [value];
+  while (stack.length) {
+    const v = stack.pop();
+    if (typeof v === 'number' && !Number.isFinite(v)) return { error: 'holds a number that is not finite' };
+    if (typeof v === 'string' && !ASCII_RE.test(v)) return { error: 'holds a string that is not ASCII' };
+    if (v && typeof v === 'object') {
+      for (const k of Object.keys(v)) {
+        if (!Array.isArray(v) && !ASCII_RE.test(k)) return { error: 'holds a key that is not ASCII' };
+        stack.push(v[k]);
+      }
+    }
+  }
+  return { value };
+}
+
+// The id in fill="url(#id)", or null.
+function fillRef(el) {
+  const m = /^url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/.exec((el.getAttribute('fill') || '').trim());
+  return m ? m[1] : null;
+}
+
+// 'tiled' (damage), '1.1' (single image, see SPEC "Textured strokes in 1.1
+// files") or 'other' (drawn flat).
+function patternForm(pat) {
+  if (sbAttr(pat, 'atlas-size') !== null || sbAttr(pat, 'tile-size') !== null) return 'tiled';
+  for (const el of pat.getElementsByTagName('*')) if (sbAttr(el, 'cell') !== null) return 'tiled';
+  const num = a => { const s = pat.getAttribute(a); return s !== null && s.trim() !== '' ? Number(s) : NaN; };
+  const [x, y, w, h] = ['x', 'y', 'width', 'height'].map(num);
+  const vb = (pat.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+  if (![x, y, w, h].every(Number.isFinite) || !(w > 0) || !(h > 0)) return 'other';
+  if (vb.length !== 4 || !vb.every(Number.isFinite) || Math.round(vb[2]) < 1 || Math.round(vb[3]) < 1) return 'other';
+  const img = pat.getElementsByTagNameNS(SVG_NS, 'image')[0];
+  return img && archiveImagePath(imageHref(img)) ? '1.1' : 'other';
+}
+
+// Draw a path in its sboardx:rgba colour, or black.
+function flatFill(path) {
+  const v = (sbAttr(path, 'rgba') || '').trim().split(/\s+/).map(Number);
+  if (v.length === 4 && v.every(Number.isFinite)) {
+    const c = k => Math.round(Math.max(0, Math.min(1, v[k])) * 255);
+    path.setAttribute('fill', `rgb(${c(0)}, ${c(1)}, ${c(2)})`);
+    path.setAttribute('fill-opacity', String(Math.max(0, Math.min(1, v[3]))));
+  } else {
+    path.setAttribute('fill', 'black');
+    path.removeAttribute('fill-opacity');
+  }
+}
+
+// Patterns by id.
+function patternsById(doc) {
+  const byId = new Map();
+  for (const pat of doc.getElementsByTagNameNS(SVG_NS, 'pattern')) {
+    const id = pat.getAttribute('id');
+    if (id && !byId.has(id)) byId.set(id, pat);
+  }
+  return byId;
+}
+
+// Load each used 1.1 atlas into a blob URL; warn once per tiled pattern.
+async function loadPatternImages(zip, doc, where) {
+  const byId = patternsById(doc);
+  const used = new Set();
+  for (const path of doc.getElementsByTagNameNS(SVG_NS, 'path')) {
+    const pat = byId.get(fillRef(path));
+    if (pat) used.add(pat);
+  }
+  for (const pat of used) {
+    const form = patternForm(pat);
+    const label = `${where} pattern ${pat.getAttribute('id')}`;
+    if (form === 'tiled') {
+      warn(`${label} uses an unsupported tiled texture pattern; its strokes are drawn in their flat colour`);
+      continue;
+    }
+    if (form !== '1.1') continue;
+    const file = archiveImagePath(imageHref(pat.getElementsByTagNameNS(SVG_NS, 'image')[0]));
+    if (S.imageUrls.has(file)) continue;
+    const atlasEntry = zip.file(file);
+    if (!atlasEntry) { warn(`${label}: ${file} is missing from the archive`); continue; }
+    const buf = await atlasEntry.async('arraybuffer');
+    S.imageUrls.set(file, URL.createObjectURL(new Blob([buf], { type: imageMimeFor(file) })));
+  }
+}
+
+// 1.1 patterns draw natively (viewBox rounded to whole texels, like Upshot).
+// Any other pattern fill draws flat.
+function resolvePatternFills(doc) {
+  const byId = patternsById(doc);
+  if (!byId.size) return;
+  const forms = new Map();
+  for (const path of doc.getElementsByTagNameNS(SVG_NS, 'path')) {
+    const pat = byId.get(fillRef(path));
+    if (!pat) continue;
+    if (!forms.has(pat)) {
+      const form = patternForm(pat);
+      forms.set(pat, form);
+      if (form === '1.1') {
+        const vb = pat.getAttribute('viewBox').trim().split(/[\s,]+/).map(n => Math.round(Number(n)));
+        pat.setAttribute('viewBox', vb.join(' '));
+      }
+    }
+    if (forms.get(pat) !== '1.1') flatFill(path);
+  }
+}
+
+// -> {name, value}, or null on link damage (paths draw flat).
+async function readTextureFile(zip, base, link, where) {
+  const flat = 'its paths are drawn in their flat colour';
+  if (typeof link !== 'string') { warn(`${where}: texture ${JSON.stringify(link)} is not a string; ${flat}`); return null; }
+  if (!linkOk(link)) { warn(`${where}: texture "${link}" breaks the link grammar; ${flat}`); return null; }
+  const name = base + link;
+  const entry = zip.file(name);
+  if (!entry || entry.dir) { warn(`${where}: texture "${link}" names no entry (${name}); ${flat}`); return null; }
+  const parsed = parseTextureBytes(await entry.async('uint8array'));
+  if (parsed.error) { warn(`${name} ${parsed.error}; ${flat}`); return null; }
+  return { name, value: parsed.value };
+}
+
+// Top-level checks -> the model, or {error} (texture damage).
+function textureModel(t) {
+  if (!t || typeof t !== 'object' || Array.isArray(t)) return { error: 'the top level is not an object' };
+  const as = t.atlas_size;
+  if (!Array.isArray(as) || as.length !== 2 || !isInt(as[0], 1, INT_MAX) || !isInt(as[1], 1, INT_MAX))
+    return { error: `atlas_size ${JSON.stringify(as)} is not two integers from 1 to ${INT_MAX}` };
+  const size = t.cell_size;
+  if (!isInt(size, CELL_SIZE_MIN, CELL_SIZE_MAX) || (size & (size - 1)))
+    return { error: `cell_size ${JSON.stringify(size)} is not a power of two from ${CELL_SIZE_MIN} to ${CELL_SIZE_MAX}` };
+  const hasRect = Object.prototype.hasOwnProperty.call(t, 'rect');
+  if (hasRect && !isRect(t.rect)) return { error: `rect ${JSON.stringify(t.rect)} is not [x, y, w, h] with w and h above 0` };
+  if (!Array.isArray(t.pages) || t.pages.some(p => typeof p !== 'string')) return { error: 'pages is not an array of strings' };
+  if (!Array.isArray(t.cells)) return { error: 'cells is not an array' };
+  if (!Array.isArray(t.paths)) return { error: 'paths is not an array' };
+  return { W: as[0], H: as[1], size, R: hasRect ? t.rect : null, pages: t.pages, cells: t.cells, paths: t.paths };
+}
+
+// Stored cells as {x, y, file, sx, sy} in texels. Bad or duplicate cells
+// are dropped (transparent). Slot bounds are checked later, per page.
+function textureCells(m, label) {
+  const cols = Math.ceil(m.W / m.size), rows = Math.ceil(m.H / m.size);
+  const byPlace = new Map(), twice = new Set();
+  m.cells.forEach((c, i) => {
+    if (!Array.isArray(c) || c.length !== 5 || !c.every(v => isInt(v, 0, INT_MAX)) ||
+        c[0] >= cols || c[1] >= rows || c[2] >= m.pages.length) {
+      warn(`${label}: cell ${i} ${JSON.stringify(c)} is not five integers [col < ${cols}, row < ${rows}, ` +
+           `page < ${m.pages.length}, slot_col, slot_row ≤ ${INT_MAX}]; drawn transparent there`);
+      return;
+    }
+    const key = `${c[0]} ${c[1]}`;
+    if (byPlace.has(key)) twice.add(key); else byPlace.set(key, c);
+  });
+  for (const key of twice) {
+    warn(`${label}: cell ${key} is listed twice; drawn transparent there`);
+    byPlace.delete(key);
+  }
+  return [...byPlace.values()].map(c => ({
+    x: c[0] * m.size, y: c[1] * m.size, file: m.pages[c[2]], page: c[2], sx: c[3] * m.size, sy: c[4] * m.size,
+  }));
+}
+
+// Not \s, which also matches \v, \f and Unicode spaces.
+function isArtSpace(c) { return c === ' ' || c === '\t' || c === '\n' || c === '\r'; }
+
+// The art check, on text with the BOM kept. '' if fine, else why (art
+// damage: the texture isn't applied).
+function artSyntaxProblem(raw) {
+  if (raw.includes('<!')) return "holds '<!' (a document type declaration, comment or CDATA section)";
+  const q = raw.indexOf('<?');
+  if (q < 0) return '';
+  const declaration = q === 0 && raw.startsWith('<?xml') && isArtSpace(raw.charAt(5));
+  if (!declaration || raw.indexOf('<?', 1) >= 0) return "holds '<?' other than in an XML declaration opening the file";
+  return '';
+}
+
+// Path tags: `<path` + whitespace up to the next `>` (or the end).
+function artPathTags(raw) {
+  const out = [];
+  let from = 0;
+  for (;;) {
+    const p = raw.indexOf('<path', from);
+    if (p < 0) return out;
+    if (p + 5 < raw.length && isArtSpace(raw.charAt(p + 5))) {
+      const gt = raw.indexOf('>', p + 5), end = gt < 0 ? raw.length : gt + 1;
+      out.push(raw.substring(p, end));
+      from = end;
+    } else from = p + 5;
+  }
+}
+
+// Every ` id="X"` in the tag, even inside another value
+// (`data-x=' id="t0"'` holds t0).
+function idsHeld(tag) {
+  const out = [];
+  let p = 0;
+  for (;;) {
+    p = tag.indexOf('id="', p);
+    if (p < 0) return out;
+    const start = p + 4;
+    if (p > 0 && isArtSpace(tag.charAt(p - 1))) {
+      const end = tag.indexOf('"', start);
+      if (end < 0) return out;
+      const id = tag.substring(start, end);
+      if (!out.includes(id)) out.push(id);
+    }
+    p = start;
+  }
+}
+
+// The listed form (rule 4 of "The art SVG's syntax"). '' if the tag is in
+// it, and `attrs` gets the attributes, else why. Pairs are read in order, so
+// a value containing ` d="` isn't mistaken for an attribute.
+function listedFormProblem(tag, attrs) {
+  const notForm = 'not one self-closing tag of name="value" attributes';
+  const n = tag.length;
+  if (n < 7 || tag.charAt(n - 1) !== '>' || tag.charAt(n - 2) !== '/') return notForm;
+  const nameStart = c => (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c === '_';
+  const nameChar = c => nameStart(c) || (c >= '0' && c <= '9') || c === '.' || c === '-';
+  const stop = n - 2, names = new Map();
+  let i = 5;
+  for (;;) {
+    const sep = i;
+    while (i < stop && isArtSpace(tag.charAt(i))) i++;
+    if (i === stop) break;
+    if (i === sep) return notForm;                     // no whitespace before the attribute
+    const ns = i;
+    if (!nameStart(tag.charAt(i))) return notForm;
+    i++;
+    while (i < stop && nameChar(tag.charAt(i))) i++;
+    if (i < stop && tag.charAt(i) === ':') {
+      i++;
+      if (i >= stop || !nameStart(tag.charAt(i))) return notForm;
+      i++;
+      while (i < stop && nameChar(tag.charAt(i))) i++;
+    }
+    const name = tag.substring(ns, i);
+    if (i + 1 >= stop || tag.charAt(i) !== '=' || tag.charAt(i + 1) !== '"') return notForm;
+    i += 2;
+    const vs = i;
+    while (i < stop && tag.charAt(i) !== '"') {
+      const c = tag.charAt(i);
+      if (c === '<' || c === '>' || c === '&') return notForm;
+      i++;
+    }
+    if (i >= stop) return notForm;                     // the value never closes before "/>"
+    if (names.has(name)) return `it carries ${name} twice`;
+    names.set(name, tag.substring(vs, i));
+    i++;
+    if (name === 'style' || name === 'transform' || name === 'xmlns' || name.startsWith('xmlns:')) return `it carries ${name}`;
+  }
+  if (!names.has('id') || !names.has('d')) return 'it lacks id or d';
+  if (attrs) for (const [k, v] of names) attrs.set(k, v);
+  return '';
+}
+
+// The path dialect (rule 5): M L Q C Z starting with M, whole argument
+// groups of finite numbers, at least one drawn segment.
+function pathDialectOk(d) {
+  let i = 0;
+  const n = d.length;
+  const skip = () => { while (i < n && (isArtSpace(d.charAt(i)) || d.charAt(i) === ',')) i++; };
+  const digit = k => k < n && d.charAt(k) >= '0' && d.charAt(k) <= '9';
+  const num = () => {
+    skip();
+    let k = i, digits = 0;
+    if (k < n && (d.charAt(k) === '+' || d.charAt(k) === '-')) k++;
+    while (digit(k)) { k++; digits++; }
+    if (k < n && d.charAt(k) === '.') {
+      k++;
+      while (digit(k)) { k++; digits++; }
+    }
+    if (!digits) return false;
+    if (k < n && (d.charAt(k) === 'e' || d.charAt(k) === 'E')) {
+      let x = k + 1;
+      if (x < n && (d.charAt(x) === '+' || d.charAt(x) === '-')) x++;
+      if (digit(x)) {
+        while (digit(x)) x++;
+        k = x;
+      }
+    }
+    if (!Number.isFinite(Number(d.substring(i, k)))) return false;
+    i = k;
+    return true;
+  };
+  const pair = () => num() && num();
+  const nextIsNumber = () => {
+    skip();
+    if (i >= n) return false;
+    const c = d.charAt(i);
+    return (c >= '0' && c <= '9') || c === '-' || c === '+' || c === '.';
+  };
+  // segs: segments in the current subpath, drawn: finished subpaths with any.
+  let segs = 0, open = false, drawn = 0, first = true;
+  const flush = () => { if (open && segs) drawn++; segs = 0; open = false; };
+  for (;;) {
+    skip();
+    if (i >= n) break;
+    const cmd = d.charAt(i++);
+    if (first && cmd !== 'M') return false;
+    first = false;
+    if (cmd === 'M') {
+      flush();
+      if (!pair()) return false;
+      open = true;
+      while (nextIsNumber()) {                          // extra pairs after M are lines
+        if (!pair()) return false;
+        segs++;
+      }
+    } else if (cmd === 'L') {
+      do { if (!pair()) return false; segs++; } while (nextIsNumber());
+    } else if (cmd === 'Q') {
+      do { if (!pair() || !pair()) return false; segs++; } while (nextIsNumber());
+    } else if (cmd === 'C') {
+      do { if (!pair() || !pair() || !pair()) return false; segs++; } while (nextIsNumber());
+    } else if (cmd === 'Z' || cmd === 'z') {
+      if (open) flush();
+    } else return false;
+  }
+  flush();
+  return drawn > 0;
+}
+
+// Usable path entries as {id, tag, view, rect}, found by the text rule
+// ("How a reader finds a listed path"). `tag` is the index among the path
+// tags, which matches getElementsByTagName('path') once the art check
+// passed. Bad entries warn once and the path draws flat.
+function texturePaths(m, raw, label) {
+  const tags = artPathTags(raw), byId = new Map();
+  tags.forEach((t, k) => {
+    for (const id of idsHeld(t)) {
+      if (!byId.has(id)) byId.set(id, []);
+      byId.get(id).push(k);
+    }
+  });
+  const told = new Set();
+  const tell = msg => { if (!told.has(msg)) { told.add(msg); warn(msg); } };
+  const listed = new Map();
+  for (const e of m.paths) {
+    if (e && typeof e === 'object' && typeof e.id === 'string') listed.set(e.id, (listed.get(e.id) || 0) + 1);
+  }
+  const out = [];
+  m.paths.forEach((e, i) => {
+    const where = `${label} paths[${i}]`;
+    const flat = 'drawn as its SVG says';
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return tell(`${where} is not an object`);
+    if (typeof e.id !== 'string' || !ID_RE.test(e.id))
+      return tell(`${where}: id ${JSON.stringify(e.id)} does not match [A-Za-z_][A-Za-z0-9_-]*`);
+    const at = `${label} path ${e.id}`;
+    const v = e.view;
+    if (!Array.isArray(v) || v.length !== 4 || !v.every(n => isInt(n, 0, INT_MAX)) || v[2] < 1 || v[3] < 1 ||
+        v[0] + v[2] > m.W || v[1] + v[3] > m.H)
+      return tell(`${at}: view ${JSON.stringify(v)} is not whole texels inside its ${m.W}×${m.H} atlas; ${flat}`);
+    const hasRect = Object.prototype.hasOwnProperty.call(e, 'rect');
+    if (hasRect && !isRect(e.rect)) return tell(`${at}: rect ${JSON.stringify(e.rect)} is not [x, y, w, h] with w and h above 0; ${flat}`);
+    if (!hasRect && !m.R) return tell(`${at} has no rect and the texture has none; ${flat}`);
+    if (listed.get(e.id) > 1) return tell(`${at} is listed by ${listed.get(e.id)} entries; ${flat}`);
+    const holders = byId.get(e.id) || [];
+    if (!holders.length) return tell(`${at}: no path tag holds id="${e.id}"; a texture was lost`);
+    if (holders.length > 1) return tell(`${at}: ${holders.length} path tags hold id="${e.id}"; ${flat}`);
+    const attrs = new Map(), form = listedFormProblem(tags[holders[0]], attrs);
+    if (form) return tell(`${at}: its tag is not in the listed form (${form}); ${flat}`);
+    if (!pathDialectOk(attrs.get('d'))) return tell(`${at}: its d is not in the path dialect; ${flat}`);
+    // Raw attribute only: no style, no inheritance, no trimming.
+    const fill = attrs.has('fill') ? attrs.get('fill') : '#000000';
+    if (fill === 'none' || fill.startsWith('url(')) return tell(`${at}: its fill is ${fill}, not a colour; ${flat}`);
+    out.push({ id: e.id, tag: holders[0], view: v, rect: hasRect ? e.rect : null });
+  });
+  return out;
+}
+
+// Read, check and compose one layer's texture.
+// -> {specs: Map path tag index -> pattern spec}, or null.
+async function loadTexture(zip, base, link, raw, where) {
+  const file = await readTextureFile(zip, base, link, where);
+  if (!file) return null;
+  const label = file.name;
+  const artWhy = artSyntaxProblem(raw);
+  if (artWhy) { warn(`${where}: the art ${artWhy}; its texture file is not applied`); return null; }
+  const m = textureModel(file.value);
+  if (m.error) { warn(`${label}: ${m.error}; the paths it lists are drawn in their flat colour`); return null; }
+  const entries = texturePaths(m, raw, label);
+  const cells = textureCells(m, label);
+  if (!entries.length) return null;
+  const specs = new Map();
+  // A pattern shows `view` over `rect`. Rect-less entries all share the
+  // whole atlas over the texture's rect.
+  const whole = m.R ? { x: m.R[0], y: m.R[1], w: m.R[2], h: m.R[3], vb: [0, 0, m.W, m.H] } : null;
+  if (m.W * m.H <= COMPOSE_MAX_PIXELS) {
+    const [img] = await composeMany(zip, m, [{ cells, label, rect: { x: 0, y: 0, w: m.W, h: m.H } }], label);
+    if (img && img.damaged) return null;
+    if (whole) whole.img = img;
+    for (const e of entries) {
+      specs.set(e.tag, e.rect ? { x: e.rect[0], y: e.rect[1], w: e.rect[2], h: e.rect[3], vb: e.view, img } : whole);
+    }
+    return { specs };
+  }
+  // Too big: one image per path, made of the whole cells its view touches.
+  // With its own rect, only the view's cells (the next cells may belong to
+  // other strokes). Rect-less, add COMPOSE_MARGIN for filtering.
+  const targets = [];
+  for (const e of entries) {
+    const [ax, ay, aw, ah] = e.view;
+    const margin = e.rect ? 0 : COMPOSE_MARGIN;
+    const x0 = Math.max(0, ax - margin), y0 = Math.max(0, ay - margin);
+    const x1 = Math.min(m.W, ax + aw + margin), y1 = Math.min(m.H, ay + ah + margin);
+    const mine = cells.filter(c => c.x < x1 && c.x + m.size > x0 && c.y < y1 && c.y + m.size > y0);
+    let rect = null;
+    for (const c of mine) {
+      const r = { x0: c.x, y0: c.y, x1: Math.min(c.x + m.size, m.W), y1: Math.min(c.y + m.size, m.H) };
+      rect = rect ? { x0: Math.min(rect.x0, r.x0), y0: Math.min(rect.y0, r.y0),
+                      x1: Math.max(rect.x1, r.x1), y1: Math.max(rect.y1, r.y1) } : r;
+    }
+    rect = rect ? { x: rect.x0, y: rect.y0, w: rect.x1 - rect.x0, h: rect.y1 - rect.y0 } : { x: x0, y: y0, w: 0, h: 0 };
+    if (rect.w * rect.h > COMPOSE_MAX_PIXELS) {
+      warn(`${label} path ${e.id}: its view is larger than this reader composes ` +
+           `(${COMPOSE_MAX_PIXELS / 1048576} MP); drawn in its flat colour`);
+      continue;
+    }
+    const spec = e.rect
+      ? { x: e.rect[0], y: e.rect[1], w: e.rect[2], h: e.rect[3], vb: e.view }
+      : { x: whole.x + ax * whole.w / m.W, y: whole.y + ay * whole.h / m.H,
+          w: aw * whole.w / m.W, h: ah * whole.h / m.H, vb: e.view };
+    targets.push({ cells: mine, label: `${label} path ${e.id}`, rect, spec, tag: e.tag });
+  }
+  const done = await composeMany(zip, m, targets, label);
+  targets.forEach((t, i) => {
+    if (done[i] && done[i].damaged) return;
+    t.spec.img = done[i];
+    specs.set(t.tag, t.spec);
+  });
+  return { specs };
+}
+
+// A page's size from its PNG header (signature, then IHDR's width and
+// height), or null if it doesn't start like a PNG. Read before decoding so
+// nothing bigger than a page is ever decoded.
+function pngSize(buf) {
+  const b = new Uint8Array(buf);
+  const sig = [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82];   // signature, IHDR length and type
+  if (b.length < 24 || sig.some((v, i) => b[i] !== v)) return null;
+  const dv = new DataView(buf);
+  return { w: dv.getUint32(16), h: dv.getUint32(20) };
+}
+
+// Decoded page, or null (warned, its cells go transparent). SPEC "Pages":
+// a PNG this browser can decode, each side from 1 to PAGE_MAX.
+async function decodePage(zip, file, label, count) {
+  const lost = `its ${count} cell${count === 1 ? '' : 's'} drawn transparent`;
+  if (!PAGE_NAME_RE.test(file)) { warn(`${label}: page "${file}" is not named images/<[A-Za-z0-9_-]+>.png; ${lost}`); return null; }
+  const entry = zip.file(file);
+  if (!entry || entry.dir) { warn(`${label}: page ${file} is missing; ${lost}`); return null; }
+  const buf = await entry.async('arraybuffer');
+  const dim = pngSize(buf);
+  if (!dim) { warn(`${label}: page ${file} is not a PNG; ${lost}`); return null; }
+  if (!(dim.w >= 1 && dim.w <= PAGE_MAX) || !(dim.h >= 1 && dim.h <= PAGE_MAX)) {
+    warn(`${label}: page ${file} is ${dim.w}×${dim.h}: a side is not from 1 to ${PAGE_MAX}; ${lost}`);
+    return null;
+  }
+  try {
+    const bitmap = await createImageBitmap(new Blob([buf], { type: 'image/png' }));
+    if (bitmap.width === dim.w && bitmap.height === dim.h) return { bitmap, w: dim.w, h: dim.h };
+    bitmap.close();
+  } catch {}
+  warn(`${label}: page ${file} could not be decoded; ${lost}`);
+  return null;
+}
+
+// Compose targets {cells, label, rect} from one texture's pages. Each gives
+// {url, x, y, w, h} in atlas texels, null if no cells, or {damaged}.
+// Each page is decoded once and released before the next, and a target's
+// canvas only lives from its first page to its last. iOS Safari caps canvas
+// memory and frees it lazily, so this keeps the peak low.
+async function composeMany(zip, m, targets, where) {
+  const users = new Map();                  // page index -> [{t, cells on it}]
+  targets.forEach((t, i) => {
+    t.index = i;
+    const mine = new Map();
+    for (const c of t.cells) {
+      if (!mine.has(c.page)) mine.set(c.page, []);
+      mine.get(c.page).push(c);
+    }
+    for (const [page, onPage] of mine) {
+      if (!users.has(page)) users.set(page, []);
+      users.get(page).push({ t, cells: onPage });
+    }
+  });
+  const order = [...users.keys()].sort((a, b) => a - b);
+  const firstAt = new Map(), lastAt = new Map();
+  order.forEach((page, k) => {
+    for (const u of users.get(page)) {
+      if (!firstAt.has(u.t)) firstAt.set(u.t, k);
+      lastAt.set(u.t, k);
+    }
+  });
+  const results = new Array(targets.length).fill(null);
+  const open = new Map();                   // target -> {cv, ctx}
+  const finish = async t => {
+    const o = open.get(t);
+    open.delete(t);
+    if (!o) return;
+    const blob = await new Promise(res => o.cv.toBlob(res, 'image/png'));
+    o.cv.width = o.cv.height = 0;
+    if (!blob) {
+      warn(`${t.label}: the browser could not compose a ${t.rect.w}×${t.rect.h} texture; drawn in the flat colour`);
+      results[t.index] = { damaged: true };
+      return;
+    }
+    results[t.index] = { url: URL.createObjectURL(blob), x: t.rect.x, y: t.rect.y, w: t.rect.w, h: t.rect.h };
+  };
+  const size = m.size;
+  for (let k = 0; k < order.length; k++) {
+    const pageIndex = order[k], file = m.pages[pageIndex];
+    for (const t of targets) {
+      if (firstAt.get(t) !== k) continue;
+      const cv = document.createElement('canvas');
+      cv.width = t.rect.w; cv.height = t.rect.h;
+      const ctx = cv.getContext('2d');
+      if (!ctx) {
+        cv.width = cv.height = 0;
+        warn(`${t.label}: the browser could not allocate a ${t.rect.w}×${t.rect.h} texture; drawn in the flat colour`);
+        results[t.index] = { damaged: true };
+        continue;
+      }
+      ctx.imageSmoothingEnabled = false;
+      open.set(t, { cv, ctx });
+    }
+    const onPage = users.get(pageIndex);
+    const count = new Set(onPage.flatMap(u => u.cells.map(c => `${c.x},${c.y}`))).size;
+    const page = await decodePage(zip, file, where, count);
+    if (page) {
+      const outside = new Set();
+      for (const { t, cells } of onPage) {
+        const o = open.get(t);
+        for (const c of cells) {
+          if (c.sx + size > page.w || c.sy + size > page.h) outside.add(`${c.x / size} ${c.y / size}`);
+          else if (o) o.ctx.drawImage(page.bitmap, c.sx, c.sy, size, size, c.x - t.rect.x, c.y - t.rect.y, size, size);
+        }
+      }
+      for (const cell of outside) {
+        warn(`${where}: cell ${cell}'s slot is not inside its ${page.w}×${page.h} page ${file}; drawn transparent there`);
+      }
+      page.bitmap.close();
+    }
+    for (const t of targets) {
+      if (lastAt.get(t) === k) await finish(t);
+    }
+  }
+  return results;
+}
+
+// Point each textured path's fill at a single-image <pattern> over its
+// composed image. The <defs> goes inside the layer <g> so it gets imported
+// with it. No image means an empty (transparent) pattern. The pattern
+// repeats past its rect, but outlines stay inside, so it never shows.
+function applyTextures(doc, tex) {
+  if (!tex || !tex.specs.size) return;
+  const host = doc.querySelector('g') || doc.documentElement;
+  const defs = doc.createElementNS(SVG_NS, 'defs');
+  host.insertBefore(defs, host.firstChild);
+  const made = new Map();                   // spec -> pattern id
+  // k-th <path> element == k-th path tag, since the art check passed.
+  const paths = Array.from(doc.getElementsByTagName('path'));
+  for (let k = 0; k < paths.length; k++) {
+    const path = paths[k], spec = tex.specs.get(k);
+    if (!spec || path.namespaceURI !== SVG_NS) continue;
+    let id = made.get(spec);
+    if (!id) {
+      id = `sbxtex-${++textureSeq}`;
+      const pat = doc.createElementNS(SVG_NS, 'pattern');
+      pat.setAttribute('id', id);
+      pat.setAttribute('patternUnits', 'userSpaceOnUse');
+      pat.setAttribute('x', String(spec.x)); pat.setAttribute('y', String(spec.y));
+      pat.setAttribute('width', String(spec.w)); pat.setAttribute('height', String(spec.h));
+      pat.setAttribute('viewBox', spec.vb.join(' '));
+      pat.setAttribute('preserveAspectRatio', 'none');
+      if (spec.img) {
+        const img = doc.createElementNS(SVG_NS, 'image');
+        img.setAttribute('href', spec.img.url);
+        img.setAttribute('x', String(spec.img.x)); img.setAttribute('y', String(spec.img.y));
+        img.setAttribute('width', String(spec.img.w)); img.setAttribute('height', String(spec.img.h));
+        img.setAttribute('preserveAspectRatio', 'none');
+        pat.appendChild(img);
+      }
+      defs.appendChild(pat);
+      made.set(spec, id);
+    }
+    path.setAttribute('fill', `url(#${id})`);
+    path.removeAttribute('fill-opacity');
+  }
+}
+
 // ── Build UI ──────────────────────────────────────────────────────────────────
 
 function buildUI() {
@@ -758,8 +1415,17 @@ function buildUI() {
   document.getElementById('proj-title').textContent = p.name;
   const res = p.canvas && p.canvas.resolution
     ? `${p.canvas.resolution.width}×${p.canvas.resolution.height}` : '';
-  document.getElementById('proj-sub').textContent =
+  const sub = document.getElementById('proj-sub');
+  sub.textContent =
     [p.episode, res, `${S.panels.length} panels`, fmtTime(S.totalDur)].filter(Boolean).join(' · ');
+  // Warning count; details in the tooltip and the console.
+  if (S.warnings.length) {
+    const w = document.createElement('span');
+    w.className = 'warn';
+    w.textContent = ` · ${S.warnings.length} warning${S.warnings.length === 1 ? '' : 's'}`;
+    w.title = S.warnings.join('\n');
+    sub.appendChild(w);
+  }
 
   buildStrip();
   buildTimeline();
@@ -802,9 +1468,7 @@ function buildTimeline() {
   const totalW = S.totalDur * S.pps;
   document.getElementById('tl-inner').style.width = Math.max(totalW + 100, 600) + 'px';
 
-  // Scene bands + camera keyframe diamonds (skipped for files without
-  // scenes, whose
-  // single synthetic scene carries no name or camera).
+  // Scene bands and camera keyframe diamonds.
   for (const sc of S.scenes) {
     if (sc.synthetic) continue;
     const band = document.createElement('div');
@@ -818,7 +1482,7 @@ function buildTimeline() {
     band.title = camSummary(sc.kfs) || sc.name;
     scenesRow.appendChild(band);
 
-    // Dashed "motion path" between consecutive keyframes, then the diamonds.
+    // Dashed line between keyframes, then the diamonds.
     for (let i = 0; i + 1 < sc.kfs.length; i++) {
       const seg = document.createElement('div');
       seg.className = 'kf-path';
@@ -847,8 +1511,7 @@ function buildTimeline() {
     el.style.width = Math.max(w - 3, 8) + 'px';
     el.textContent = panel.dispCode;
     if (panel.scene && !panel.scene.synthetic) {
-      // Scene color bar along the clip's top edge (inset so the active
-      // border still renders on all four sides).
+      // Scene color on top, inset so the active border still shows.
       el.style.boxShadow = 'inset 0 2px 0 ' + panel.scene.color;
     }
     el.addEventListener('click', () => seekToPanel(idx));
@@ -856,10 +1519,8 @@ function buildTimeline() {
     t += panel.meta.dur;
   });
 
-  // One 36px row per audio track; muted rows render dimmed. The timeline
-  // grid row grows to fit (78px of ruler/video + N*36 + 8 padding). Set
-  // through --tl-h rather than an inline grid-template-rows so the compact
-  // landscape media query can still drop the row.
+  // 36px per audio track. Height goes through --tl-h so compact landscape
+  // can still drop the row.
   const nTracks = Math.max(1, S.tracks.length);
   audio.style.height = (nTracks * 36) + 'px';
   document.getElementById('app').style.setProperty('--tl-h', `${78 + nTracks * 36 + 8}px`);
@@ -887,45 +1548,37 @@ function buildTimeline() {
 
 // ── SVG composite ─────────────────────────────────────────────────────────────
 
-let blurFilterSeq = 0;   // unique <filter> ids across all composites on the page
-let gradientSeq = 0;     // unique gradient ids across all composites on the page
+// Page-wide id counters.
+let blurFilterSeq = 0;
+let gradientSeq = 0;
+let textureSeq = 0;
 
-// layers.json blend -> CSS mix-blend-mode (SPEC: `add` is CSS plus-lighter).
-// '' for normal so no style is written.
+// layers.json blend -> mix-blend-mode. `add` is plus-lighter.
 function cssBlend(blend) {
   if (!blend || blend === 'normal') return '';
   return blend === 'add' ? 'plus-lighter' : blend;
 }
 
-// layers.json is the authoritative opacity/blend (SPEC "layers.json is
-// authoritative if they disagree"); the art <g>'s baked style is only the
-// fallback for a producer that omits the keys (Toon Boom's exporter bakes
-// no style at all, so without this its layer opacity was lost).
+// layers.json wins over the style baked into the art <g>. Toon Boom bakes
+// no style at all.
 function applyLayerStyle(el, layer) {
   if (typeof layer.opacity === 'number') el.style.opacity = layer.opacity === 100 ? '' : String(layer.opacity / 100);
   if (typeof layer.blend === 'string') el.style.mixBlendMode = cssBlend(layer.blend);
 }
 
-// Every panel's SVG is composited into the ONE HTML document (thumbnails
-// and the stage), where element ids are global: gradient ids such as `g0`
-// repeat across layers and panels. Rename each gradient definition and
-// every `url(#id)` reference to it with a page-unique suffix before import.
-// Textured strokes (1.1): the pattern images point at archive entries
-// relative to the art SVG; point them at the blob URLs loaded above.
+// Point 1.1 pattern images at their blob URLs.
 function resolveAtlasHrefs(doc) {
   doc.querySelectorAll('pattern image').forEach(img => {
-    const href = img.getAttribute('href') || img.getAttribute('xlink:href');
-    if (!href) return;
-    const m = /^(?:\.\.\/)+(images\/.+)$/.exec(href);
-    if (!m) return;
-    const url = S.imageUrls && S.imageUrls.get(m[1]);
+    const file = archiveImagePath(imageHref(img));
+    if (!file) return;
+    const url = S.imageUrls && S.imageUrls.get(file);
     if (url) { img.setAttribute('href', url); img.removeAttribute('xlink:href'); }
   });
 }
 
+// All panels share one HTML document, so ids like `g0` collide across
+// layers. Rename gradients and patterns, and their references.
 function uniquifyGradientIds(doc) {
-  // Patterns (1.1 "Textured strokes") share the id space: `tex4` repeats
-  // across layers exactly like `g0`.
   const grads = doc.querySelectorAll('linearGradient, radialGradient, pattern');
   if (!grads.length) return;
   const renames = new Map();
@@ -954,9 +1607,7 @@ function compositeSVG(panel, mini = false) {
   const h = S.project.canvas.height;
   const NS = 'http://www.w3.org/2000/svg';
 
-  // World coordinates: the frame is centered on the origin,
-  // so the viewport spans -w/2..w/2 / -h/2..h/2. Overflow art lies outside
-  // it and is revealed only by the camera transform.
+  // World coords, frame centered on the origin.
   const root = document.createElementNS(NS, 'svg');
   root.setAttribute('viewBox', `${-w / 2} ${-h / 2} ${w} ${h}`);
   root.setAttribute('xmlns', NS);
@@ -968,12 +1619,8 @@ function compositeSVG(panel, mini = false) {
   bg.setAttribute('fill', 'white');
   root.appendChild(bg);
 
-  // Layer blur: an SVG filter per blurred layer, stdDeviation = the sigma in
-  // world units (user space IS world units, so it passes through 1:1). A
-  // real <filter> rather than the CSS `filter: blur()` shorthand the art
-  // <g> carries, because WebKit ignores CSS filter functions on SVG content.
-  // layers.json is the authoritative value. The region covers a full frame
-  // of overflow on every side so blurred overflow art isn't clipped.
+  // Layer blur as a real SVG <filter>: WebKit ignores CSS blur() on SVG
+  // content. The region spans a frame of overflow on each side.
   let defs = null;
   const blurFilterFor = (layer) => {
     if (!(layer.blur > 0)) return null;
@@ -991,9 +1638,7 @@ function compositeSVG(panel, mini = false) {
     return `url(#${id})`;
   };
 
-  // Every layer's node sits in its own <g> wrapper: the wrapper carries the
-  // layer's animation pose (transform + opacity from the scene's
-  // layer_tracks), so the art inside stays untouched.
+  // Each layer gets a wrapper <g> that carries its animation pose.
   const anim = [];
   const attach = (node, layer) => {
     const wrap = document.createElementNS(NS, 'g');
@@ -1006,13 +1651,11 @@ function compositeSVG(panel, mini = false) {
   for (const layer of panel.layers) {        // already bottom-to-top
     if (!layer.visible) continue;
     const blurUrl = blurFilterFor(layer);
-    // Raster layer: one <image> in world coordinates — the natural-
-    // pixel rect centered on the origin, mapped by the stored affine
-    // (matrix() shares CoreGraphics' scalar layout, so the six-tuple passes
-    // through untouched). Its art SVG is an empty <g> and is skipped.
+    // Raster layer: the image centered on the origin, then the stored
+    // affine as is. Its art SVG is empty, skip it.
     if (layer.image) {
       const url = S.imageUrls && S.imageUrls.get(layer.image.file);
-      if (!url) continue;                    // bytes missing from the archive
+      if (!url) continue;                    // missing from the archive
       const [a, b, c, d, tx, ty] = layer.image.transform;
       const img = document.createElementNS(NS, 'image');
       img.setAttribute('href', url);
@@ -1022,8 +1665,6 @@ function compositeSVG(panel, mini = false) {
       img.setAttribute('height', String(layer.image.h));
       img.setAttribute('preserveAspectRatio', 'none');
       img.setAttribute('transform', `matrix(${a} ${b} ${c} ${d} ${tx} ${ty})`);
-      // A raster layer's art SVG is skipped, so its styling comes from
-      // layers.json here (the same authoritative source vector layers use).
       applyLayerStyle(img, layer);
       if (blurUrl) img.style.filter = blurUrl;
       attach(img, layer);
@@ -1033,31 +1674,29 @@ function compositeSVG(panel, mini = false) {
     if (!svgStr) continue;
     const doc = parser.parseFromString(svgStr, 'image/svg+xml');
     uniquifyGradientIds(doc);
+    resolvePatternFills(doc);
+    applyTextures(doc, S.textures.get(`${panel.id}/${layer.id}`));
     resolveAtlasHrefs(doc);
-    // Gradient definitions a third-party writer put outside the layer <g>
-    // (Upshot puts its <defs> inside the <g>, so they ride along below).
+    // Some writers put <defs> outside the layer <g>; carry them along.
     const rootDefs = Array.from(doc.documentElement.children)
       .filter(child => child.tagName === 'defs');
     const g = doc.querySelector('g');
     if (g) {
       const node = document.importNode(g, true);
       for (const d of rootDefs) node.insertBefore(document.importNode(d, true), node.firstChild);
-      // layers.json opacity/blend override the baked style; replace the
-      // baked CSS blur (if any) with the <filter> reference.
+      // Swap any baked CSS blur for the <filter>.
       applyLayerStyle(node, layer);
       if (blurUrl) node.style.filter = blurUrl;
       else if (node.style && node.style.filter) node.style.filter = '';
       attach(node, layer);
     } else {
-      // Fallback: some producers (e.g. Toon Boom's TB_ExportSboardx before
-      // it grew the wrapper) emit drawables directly under <svg> with no
-      // <g> — import them in document order instead of dropping the layer.
+      // No layer <g>: import the root's children in order.
       const wrap = document.createElementNS(NS, 'g');
       applyLayerStyle(wrap, layer);
       if (blurUrl) wrap.style.filter = blurUrl;
       for (const child of Array.from(doc.documentElement.children)) {
         if (child.tagName === 'parsererror') continue;
-        // The app exporter's invisible frame-placeholder rect.
+        // Upshot's invisible frame rect.
         if (child.tagName === 'rect' && child.getAttribute('fill') === 'none') continue;
         wrap.appendChild(document.importNode(child, true));
       }
@@ -1065,7 +1704,7 @@ function compositeSVG(panel, mini = false) {
     }
   }
   if (mini) {
-    // Thumbnails are static: pose at the panel's first frame.
+    // Thumbnails: pose at the panel's first frame.
     if (panel.scene) {
       for (const { el, layer } of anim) poseLayerNode(el, layer, panel.scene, panel.sceneLocalStart || 0);
     }
@@ -1086,9 +1725,8 @@ function renderPanel(idx) {
   const wrap = document.getElementById('canvas-wrap');
   const w = S.project.canvas.width, h = S.project.canvas.height;
   wrap.style.aspectRatio = `${w} / ${h}`;
-  // Size to fit available space while keeping aspect ratio. Skip when the
-  // layout isn't live (a 0-size area would collapse the canvas); the resize
-  // listener re-renders once real geometry exists.
+  // Fit, keeping aspect. Skip while the area is 0x0; the resize observer
+  // calls again later.
   const area = wrap.parentElement;
   const cs = getComputedStyle(area);
   const aw = area.clientWidth  - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
@@ -1099,8 +1737,7 @@ function renderPanel(idx) {
     wrap.style.height = Math.round(h * scale) + 'px';
   }
 
-  // The composite lives inside #cam-content, which receives the scene's
-  // camera transform (sampled at the playhead) while the panel shows.
+  // #cam-content gets the camera transform.
   const cam = document.getElementById('cam-content');
   cam.innerHTML = '';
   cam.appendChild(compositeSVG(panel));
@@ -1116,7 +1753,7 @@ function renderPanel(idx) {
     (scene && camSummary(scene.kfs)) || '—';
   document.getElementById('m-dialogue').textContent = panel.meta.dialogue || '';
   document.getElementById('m-note').textContent = panel.meta.note || '';
-  // The compact landscape rail shows only these two and hides empty ones.
+  // The compact landscape rail hides these when empty.
   document.getElementById('mf-dialogue').classList.toggle('empty', !panel.meta.dialogue);
   document.getElementById('mf-note').classList.toggle('empty', !panel.meta.note);
 
@@ -1220,8 +1857,7 @@ function startAudio() {
   stopAudio();
   for (const clip of S.clips) {
     if (!clip.blobUrl) continue;
-    // Muted track: silenced (clips on different tracks otherwise all play —
-    // each clip is its own Audio element).
+    // Muted track: skip. Each clip is its own Audio element.
     const track = S.tracks[Math.max(0, clip.track ?? 0)];
     if (track && track.muted) continue;
     const clipEnd = clip.start + clip.dur;
@@ -1291,8 +1927,7 @@ document.getElementById('play-btn').addEventListener('click', togglePlay);
 document.getElementById('next-btn').addEventListener('click', nextPanel);
 document.getElementById('prev-btn').addEventListener('click', prevPanel);
 
-// Horizontal swipe on the canvas steps panels in the compact layouts, where
-// the strip (and in landscape the timeline) are hidden.
+// Swipe the canvas to change panel in compact layouts.
 {
   const area = document.getElementById('canvas-area');
   let sx = 0, sy = 0, tracking = false;

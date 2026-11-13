@@ -3,6 +3,35 @@
 Format versions, not repo releases. The version is the `sboardx` string in
 `project.json`.
 
+## 1.2
+
+Every 1.0 and 1.1 file is a valid 1.2 file.
+
+- **Textures live outside the SVG.** A textured path is now a plain flat
+  path with an `id`, whose `fill` and `fill-opacity` are the texture's
+  average colour and coverage. The texture is in the layer's texture file,
+  `panels/<panelID>/art/<layerID>.texture.json`, linked by the new
+  `layers.json` key `texture` (a shared drawing's is
+  `shared/<id>/texture.json`, linked from `shared/index.json`). The file
+  cuts the layer's texture into square cells, stores the cells that hold
+  ink in PNG pages of at most 2048 × 2048, and says which part of the
+  texture each path shows and where.
+- A textured pencil keeps its own colour in `sboardx:pencil-rgba`.
+- 1.1 pattern-fill textures and derived pencil layers are still read.
+  Writers don't write them any more.
+- 1.2 art has no `transform` attributes.
+- `layers.json` `shared` is a live link: editing a shared drawing edits
+  every layer that names it. Each layer still carries a copy of the art.
+- The merge panel digest is SHA-256, and covers texture files and their
+  pages. `sync.panels` bases are 64 hex digits.
+- Reader, `validate.py` and Toon Boom scripts read 1.2. New samples
+  `Textured.sboardx` and its 1.1 twin `Textured_1_1.sboardx`, written by
+  `examples/python/write_textured.py`. New `schema/texture.schema.json`.
+
+Toon Boom scripts and Upshot builds older than 1.2 refuse 1.2 files, so
+update the Storyboard Pro scripts before exchanging files with an Upshot
+that writes 1.2.
+
 ## 1.1
 
 Additive only: a 1.0 file is a valid 1.1 file with the new keys absent.

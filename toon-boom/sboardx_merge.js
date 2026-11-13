@@ -1,28 +1,36 @@
-// sboardx_merge.js — the implementation behind TB_MergeSboardx.js ("Update
-// from .sboardx"), loaded via require(). Needs sboardx_common.js,
-// sboardx_import.js and sboardx_export.js in the same folder. See README.md.
+// sboardx_merge.js: "Update from .sboardx", behind TB_MergeSboardx.js.
+// Needs sboardx_common.js, sboardx_import.js and sboardx_export.js beside it.
 //
-// The 3-way, panel-level merge of an .sboardx into the open project — the
-// counterpart of Upshot's Merge/SboardxMerge.hpp, over the same archive
-// digest rule (sboardx_common.js archivePanelDigest) and the project's id
-// map (sboardx-ids metadata, keyed by native ids). Per archive panel,
-// matched by id:
+// 3-way, panel-level merge of an .sboardx into the open project, same rules
+// as Upshot's. Uses the archive digest (archivePanelDigest) and the id map
+// (sboardx-ids metadata, keyed by native ids). Per archive panel, by id:
 //   unknown here                            -> added, at its archive position
 //   archive digest == map.digest            -> unchanged (the digest is the
 //                                              base the archive declares for
 //                                              the panel, else its bytes')
-//   archive changed, own form == map.local  -> updated (replaced whole)
+//   archive changed, unchanged here         -> updated (replaced whole)
 //   both changed, or no baseline            -> conflict: Keep mine / Take theirs
 //   native panels absent from the archive   -> removed (kept unless asked)
 //   position differs                        -> moved: re-created at the
 //                                              archive's slot (no move API)
-// Scene cameras follow the same table over the sboardx-camera baseline;
-// audio is replaced wholesale only when asked. Everything runs in one undo
-// accumulation and the project is saved on success.
+// "Unchanged here" means the fingerprint now equals map.fp from the last
+// exchange. No fp, no baseline, so a panel changed in the file asks.
+// Scene cameras use the same table (applyCameras). Audio is replaced whole,
+// only when asked. One undo step, saved on success.
 
 var common = require("./sboardx_common.js");
 var imp = require("./sboardx_import.js");
 var exp = require("./sboardx_export.js");
+
+// An import env plus the merge's own state.
+function makeMergeEnv(log, quiet, options) {
+    var env = imp.makeImportEnv(log, quiet, options);
+    env.mergeCounts = { updated: 0, added: 0, removed: 0, moved: 0, kept: 0, conflicts: 0, unchanged: 0,
+                        recreated: 0, scenesAdded: 0, cameras: 0, camerasKept: 0, audio: false };
+    env.stampAfter = [];   // panels filled from the archive, stamped at the end
+    env.xenv = null;       // export env for own forms and live cameras, made after the save
+    return env;
+}
 
 // options (batch): { takeTheirs: "all" | [archive panel ids], deleteRemoved: bool,
 //                    keepInPlace: [archive panel ids], takeCameras: "all" | [archive scene ids],
@@ -30,11 +38,8 @@ var exp = require("./sboardx_export.js");
 function mergeFromFile(zipPath, quiet, options) {
     var log = common.makeLog("[sboardx-merge] ", quiet);
     if (!common.requireApi(log)) return false;
-    var env = imp.makeImportEnv(log, quiet, options);
-    env.mergeCounts = { updated: 0, added: 0, removed: 0, moved: 0, kept: 0, conflicts: 0, unchanged: 0,
-                        recreated: 0, scenesAdded: 0, cameras: 0, camerasKept: 0, audio: false };
-    env.stampAfter = [];   // native panels filled from the archive: baselines stamped at the end
-    // The plan's "changed here?" digests read each panel's drawings from their saved files.
+    var env = makeMergeEnv(log, quiet, options);
+    // "Changed here?" reads drawings from the saved files.
     if (!common.ensureProjectSaved(log, quiet, "The update")) {
         log.report("Update cancelled: the project was not saved.\n\nSave it (File > Save) and run the update again.", true);
         return false;
@@ -47,9 +52,10 @@ function mergeFromFile(zipPath, quiet, options) {
 
     env.progress.busy("Comparing with the project…");
     env.idMap = common.loadIdMap(env.sb, log);
-    env.xenv = exp.makeExportEnv(log, "");   // the panels' own exported forms and the live cameras
+    env.xenv = exp.makeExportEnv(log, "");
     env.xenv.idMap = env.idMap;
     var plan = computePlan(env);
+    imp.planSharedDrawings(env);   // before anything changes
     env.progress.close();
 
     var res = resolvePlan(env, plan);
@@ -58,38 +64,51 @@ function mergeFromFile(zipPath, quiet, options) {
         return false;
     }
     if (!plan.hasChanges && !res.takeAudio) {
-        log.report("Nothing to update — the file matches this project.", false);
+        log.report("Nothing to update: the file matches this project.", false);
         return true;
     }
 
     env.progress = common.makeProgress("Updating from .sboardx", quiet);
+    // No backup, no merge.
+    env.backup = common.backupProject(log, env.progress, "The update");
+    if (!env.backup.ok) { env.progress.close(); log.report(env.backup.message, true); return false; }
+    // Palette edits move the Colour view, put it back whatever happens.
+    var colorView = common.captureColorView();
+    env.colorView = colorView;
     project.beginUndoRedoAccum("Update from sboardx");
     try {
         imp.applyProjectSettings(env);
         env.progress.begin(env.sequenceJson.panels.length);
         applyPlan(env, plan, res);
+        imp.removeScratchPalette(env);
         project.endUndoRedoAccum();
     } catch (err) {
         project.cancelUndoRedoAccum();
+        common.restoreColorView(colorView, log);
         env.progress.close();
         if (err && err.sboardxCancelled) log.report("Update cancelled. The project was not changed.", true);
         else log.report("sboardx update failed: " + err, true);
         return false;
+    } finally {
+        env.clipboard.restore();
     }
+    imp.keepColorView(env);
     env.progress.busy("Recording the merge baselines…");
-    exp.finishExchange(log, env.idMap, env.stampAfter);
+    exp.finishExchange(log, env.idMap, env.stampAfter, env.cameraStamps, env.sharedStamps);
+    common.restoreColorView(colorView, log);
     env.progress.close();
     var c = env.mergeCounts;
     log.trace("MERGE updated=" + c.updated + " added=" + c.added + " removed=" + c.removed + " moved=" + c.moved +
-              " conflicts=" + c.conflicts + " kept=" + c.kept);
-    log.report(log.summary(mergeSummary(env, plan)), false);
+              " conflicts=" + c.conflicts + " kept=" + c.kept + " nativeKept=" + env.counts.nativeKept);
+    imp.traceTextureDecodes(env);
+    log.report(log.summary(mergeSummary(env, plan) + common.backupNote(env.backup)), false);
     return true;
 }
 
 // ── The plan ────────────────────────────────────────────────────────────────
 
-// The project as it is: scenes and panels by native id, with their archive
-// ids from the map (identity when unmapped — a Toon Boom-born entity).
+// Scenes and panels as they are, with archive ids from the map (or their
+// native id when unmapped).
 function walkNative(env) {
     var nat = { scenes: [], panelsByArchiveId: {}, scenesByArchiveId: {} };
     var g = 0;
@@ -109,7 +128,7 @@ function walkNative(env) {
     return nat;
 }
 
-// The longest increasing run of `values` (indices into it): what "stayed".
+// Longest increasing subsequence, as a set of indices: what stayed put.
 function longestIncreasingRun(values) {
     var tails = [], prev = new Array(values.length);
     for (var i = 0; i < values.length; i++) {
@@ -126,17 +145,40 @@ function longestIncreasingRun(values) {
     return stayed;
 }
 
-// The entry's own exported form ({dir, outId, hex}, exp.ownForm), computed
-// once, before the undo accumulation.
-function ownFormOf(env, e, local) {
-    if (e.own === undefined) {
-        try { e.own = exp.ownForm(env.xenv, local.scene, local.native); }
+// The panel's own exported form, cached. A kept panel that moves is
+// re-created from it, so get it before anything changes.
+function ownFormOf(env, item, nativePanel) {
+    if (item.own === undefined) {
+        try { item.own = exp.ownForm(env.xenv, nativePanel.scene, nativePanel.native); }
         catch (err) {
-            env.log.warn("panel " + local.native + ": could not export its current form (" + err + ")");
-            e.own = null;
+            env.log.warn("panel " + nativePanel.native + ": could not export its current form (" + err + ")");
+            item.own = null;
         }
     }
-    return e.own;
+    return item.own;
+}
+
+// Cached fingerprint, "" on failure (then it reads as changed here).
+function fingerprintOf(env, item, nativePanel) {
+    if (item.fpNow === undefined) {
+        try { item.fpNow = exp.panelFingerprint(env.xenv, nativePanel.scene, nativePanel.native).hex; }
+        catch (err) {
+            env.log.warn("panel " + nativePanel.native + ": could not compute its fingerprint (" + err + ")");
+            item.fpNow = "";
+        }
+    }
+    return item.fpNow;
+}
+
+function changedHere(env, item, nativePanel, entry) {
+    return common.changedSinceExchange(entry, function () { return fingerprintOf(env, item, nativePanel); });
+}
+
+// Grab what a re-created panel needs before anything changes: its own form,
+// and its fingerprint if it has a baseline (see recreatedBaseline).
+function prepareRecreate(env, item, nativePanel) {
+    ownFormOf(env, item, nativePanel);
+    if (common.idEntryFingerprint(nativePanel.entry)) fingerprintOf(env, item, nativePanel);
 }
 
 function computePlan(env) {
@@ -144,8 +186,8 @@ function computePlan(env) {
     var plan = { entries: [], byId: {}, addedScenes: [], movedScenes: [], cameras: [], sceneNative: {}, nat: nat,
                  counts: { updated: 0, added: 0, removed: 0, conflicts: 0, moved: 0, unchanged: 0, noBaseline: 0,
                            camerasUpdated: 0, camerasConflicts: 0 } };
-    // Moves: the common panels in archive order against their native
-    // positions — the longest increasing run stayed, the rest moved.
+    // Moves: common panels in archive order vs native positions. The LIS
+    // stayed, the rest moved.
     var commonIds = [], commonPos = [];
     env.groups.forEach(function (grp) {
         grp.panels.forEach(function (id) {
@@ -163,44 +205,41 @@ function computePlan(env) {
         group.panels.forEach(function (srcId, p) {
             seen[srcId] = true;
             var meta = common.readJsonFile(env.extractDir + "/panels/" + srcId + "/panel.json") || {};
-            var e = { id: srcId, kind: "unchanged", moved: false, sceneArchiveId: group.srcId, sceneName: group.name, index: p,
+            var item = { id: srcId, kind: "unchanged", moved: false, sceneArchiveId: group.srcId, sceneName: group.name, index: p,
                       code: meta.code ? String(meta.code) : srcId, native: null, nativeScene: null, archiveDigest: "", noBaseline: false };
-            var local = nat.panelsByArchiveId[srcId] || null;
-            if (!local) {
-                e.kind = "added";
+            var nativePanel = nat.panelsByArchiveId[srcId] || null;
+            if (!nativePanel) {
+                item.kind = "added";
                 plan.counts.added++;
             } else {
-                e.native = local.native;
-                e.nativeScene = local.scene;
-                // The declared base (project.json sync.panels) names the
-                // exchange the writer's panel is unchanged since: the
-                // comparison is against it, never the archive's bytes.
-                e.archiveDigest = imp.archiveBaseOf(env, srcId) || common.archivePanelDigest(env.extractDir, srcId);
-                var entry = local.entry;
+                item.native = nativePanel.native;
+                item.nativeScene = nativePanel.scene;
+                // Compare against the declared base (sync.panels) when
+                // there is one, not the archive's bytes.
+                item.archiveDigest = imp.panelBaseDigest(env, srcId);
+                var entry = nativePanel.entry;
                 if (!entry || !entry.digest) {
-                    // No baseline (an older import): a question, never a silent overwrite.
-                    e.noBaseline = true;
-                    e.kind = "conflict";
+                    // Never exchanged: ask, don't overwrite.
+                    item.noBaseline = true;
+                    item.kind = "conflict";
                     plan.counts.conflicts++;
                     plan.counts.noBaseline++;
-                } else if (entry.digest !== e.archiveDigest) {
-                    var mine = ownFormOf(env, e, local);
-                    var localChanged = !mine || !entry.local || mine.hex !== entry.local;
-                    e.kind = localChanged ? "conflict" : "updated";
+                } else if (entry.digest !== item.archiveDigest) {
+                    var localChanged = changedHere(env, item, nativePanel, entry);
+                    item.kind = localChanged ? "conflict" : "updated";
                     plan.counts[localChanged ? "conflicts" : "updated"]++;
                 } else {
                     plan.counts.unchanged++;
                 }
-                // Moved within/between scenes; a panel whose archive scene is new here moves into it.
-                if (movedIds[srcId] || !nativeScene || nativeScene.native !== local.scene) {
-                    e.moved = true;
+                // Also moved if its archive scene is new here.
+                if (movedIds[srcId] || !nativeScene || nativeScene.native !== nativePanel.scene) {
+                    item.moved = true;
                     plan.counts.moved++;
                 }
-                // What a kept panel is re-created from when it moves, and its `local` baseline.
-                if (e.moved || !entry || !entry.local) ownFormOf(env, e, local);
+                if (item.moved) prepareRecreate(env, item, nativePanel);
             }
-            plan.entries.push(e);
-            plan.byId[srcId] = e;
+            plan.entries.push(item);
+            plan.byId[srcId] = item;
         });
     });
     nat.scenes.forEach(function (scene) {
@@ -213,7 +252,7 @@ function computePlan(env) {
             plan.counts.removed++;
         });
     });
-    // Scene moves: archive scene order vs native order of the common scenes.
+    // Scene moves, same idea.
     var sceneIds = [], scenePos = [];
     env.groups.forEach(function (grp) {
         var ns = nat.scenesByArchiveId[grp.srcId];
@@ -221,41 +260,27 @@ function computePlan(env) {
     });
     var sceneStayed = longestIncreasingRun(scenePos);
     sceneIds.forEach(function (id, i) { if (!sceneStayed[i]) plan.movedScenes.push(id); });
-    // Every panel of a re-created (moved) scene is re-created too: its own
-    // form is needed, local-only (removed) panels included.
+    // A moved scene re-creates all its panels, local-only ones too.
     plan.movedScenes.forEach(function (id) {
         nat.scenesByArchiveId[id].panels.forEach(function (lp) {
             var pe = plan.byId[lp.archiveId];
-            if (pe && pe.kind !== "added") ownFormOf(env, pe, lp);
+            if (pe && pe.kind !== "added") prepareRecreate(env, pe, lp);
         });
     });
-    // Cameras: the sboardx-camera metadata on the scene's first panel is the
-    // camera as last exchanged; the archive's keyframes against it say
-    // "archive changed", the live camera against it "local changed". No
-    // metadata = no baseline: unchanged only when the archive equals the live
-    // camera; with no live camera the file's move is simply taken.
+    // Cameras (common.cameraMergeKind).
     env.groups.forEach(function (grp) {
         var cns = nat.scenesByArchiveId[grp.srcId] || null;
         if (!cns) return;
-        var meta = exp.readCameraMeta(env, cns.panels.length ? cns.panels[0].native : "");
+        var base = common.readCameraBase(env.sb, cns.panels.length ? cns.panels[0].native : "");
         var live = [];
         try { live = exp.readLiveCamera(env.xenv, cns.native); }
         catch (eL) { env.log.warn("scene '" + grp.name + "': live camera not read (" + eL + ")"); }
-        var archiveKfs = grp.keyframes;
-        var ce = { sceneArchiveId: grp.srcId, sceneName: grp.name, native: cns.native, archiveKfs: archiveKfs, live: live,
-                   kind: "unchanged", noBaseline: !meta };
-        var archiveChanged, localChanged;
-        if (!meta) {
-            var same = exp.cameraKfsMatch(env, live, archiveKfs);
-            archiveChanged = !same;
-            localChanged = !same && live.length > 0;
-        } else {
-            archiveChanged = !exp.cameraKfsMatch(env, archiveKfs, meta);
-            localChanged = !exp.cameraKfsMatch(env, live, meta);
-        }
-        if (archiveChanged && localChanged) { ce.kind = "conflict"; plan.counts.camerasConflicts++; }
-        else if (archiveChanged) { ce.kind = "updated"; plan.counts.camerasUpdated++; }
-        else if (localChanged) ce.kind = "localOnly";
+        var ce = { sceneArchiveId: grp.srcId, sceneName: grp.name, native: cns.native, archiveKfs: grp.keyframes, live: live,
+                   base: base, noBaseline: !base,
+                   kind: common.cameraMergeKind(grp.keyframes, live, base, env.xenv.fps, common.sceneFrameCount(env.sb, cns.native)) };
+        if (ce.kind === "conflict") plan.counts.camerasConflicts++;
+        else if (ce.kind === "updated") plan.counts.camerasUpdated++;
+        env.log.trace("CAMERA scene '" + grp.name + "' " + ce.kind + (ce.noBaseline ? " (no baseline)" : ""));
         plan.cameras.push(ce);
     });
     var clipsJson = common.readJsonFile(env.extractDir + "/audio/clips.json");
@@ -268,9 +293,8 @@ function computePlan(env) {
 
 // ── The dialog ──────────────────────────────────────────────────────────────
 
-// The answers: { takeTheirs: [archive panel ids], takeTheirsScenes: [archive
-// scene ids], deleteRemoved, keepInPlace: {id: true}, takeAudio }; null =
-// cancelled. Batch takes them from the options.
+// { takeTheirs, takeTheirsScenes, deleteRemoved, keepInPlace: {id: true},
+// takeAudio }, null if cancelled. Batch reads the options instead.
 function resolvePlan(env, plan) {
     var conflicts = plan.entries.filter(function (e) { return e.kind === "conflict"; });
     var removed = plan.entries.filter(function (e) { return e.kind === "removed"; });
@@ -278,7 +302,7 @@ function resolvePlan(env, plan) {
     var camConflicts = plan.cameras.filter(function (c) { return c.kind === "conflict"; });
     var res = { takeTheirs: [], takeTheirsScenes: [], deleteRemoved: false, keepInPlace: {}, takeAudio: false };
     if (env.quiet) {
-        // "all", or a list of archive ids; anything else keeps this project's version.
+        // "all" or a list of ids, anything else keeps ours.
         var pick = function (opt, all) {
             return opt === "all" ? all : (Object.prototype.toString.call(opt) === "[object Array]" ? opt.slice() : []);
         };
@@ -346,6 +370,7 @@ function mergeSummary(env, plan) {
            (c.cameras || c.camerasKept ? "; cameras: " + c.cameras + " taken from the file, " + c.camerasKept + " kept" : "") +
            (c.audio ? "; audio tracks replaced" : "") +
            imp.sharedDrawingsNote(env.counts) +
+           (env.counts.nativeKept ? "; " + env.counts.nativeKept + " text layer(s) kept as text (their pictures came back unchanged)" : "") +
            (plan.counts.noBaseline ? "; " + plan.counts.noBaseline + " panel(s) had no merge baseline (first merge)" : "") + ".";
 }
 
@@ -358,8 +383,7 @@ function applyPlan(env, plan, res) {
     var nat = plan.nat, map = env.idMap;
     var deleteOld = [], deleteScenes = [];   // moved originals, deleted at the end
 
-    // Scenes in archive order — created (new), re-created (moved) or kept —
-    // then their panels in archive order.
+    // Scenes in archive order (new, re-created or kept), then their panels.
     var prevNativeScene = "";
     env.groups.forEach(function (group) {
         var nativeScene = nat.scenesByArchiveId[group.srcId] || null;
@@ -395,8 +419,8 @@ function applyPlan(env, plan, res) {
                 env.stampAfter.push(panelId);
                 env.mergeCounts.added++;
             } else if ((e.moved && !res.keepInPlace[srcId]) || freshScene) {
-                // Re-created at the archive's slot: from the archive when its
-                // content is taken, else from its own exported form.
+                // No move API: re-create at the archive's slot, from the
+                // archive if taken, else from its own form.
                 var newId = imp.createPanelAt(env, sceneId, prevNativePanel, token, p === 0 && freshScene);
                 if (!newId) { env.log.warn("panel " + e.code + " could not be re-created; left in place"); }
                 else {
@@ -408,7 +432,7 @@ function applyPlan(env, plan, res) {
                     if (!map.panels[panelId]) map.panels[panelId] = common.newIdEntry(srcId);
                     rekeyPanel(map, panelId, newId);
                     if (fromOwn) {
-                        stampLocal(env, newId, e);
+                        recreatedBaseline(env, newId, e);
                     } else {
                         imp.recordPanelInIdMap(env, newId, srcId);
                         env.stampAfter.push(newId);
@@ -426,17 +450,19 @@ function applyPlan(env, plan, res) {
                 env.mergeCounts.updated++;
                 if (e.kind === "conflict") env.mergeCounts.conflicts++;
             } else {
-                // Kept (unchanged, or keep mine): this archive version stops asking.
+                // Kept: this file version stops asking, but don't stamp a
+                // baseline. After a "keep mine" with none, a stamp would make
+                // the next export declare the file's version as the base and
+                // Upshot would keep its own over ours.
                 if (!map.panels[panelId]) map.panels[panelId] = common.newIdEntry(srcId);
                 map.panels[panelId].digest = e.archiveDigest;
-                if (!map.panels[panelId].local) stampLocal(env, panelId, e);
                 if (e.kind === "conflict") { env.mergeCounts.kept++; env.mergeCounts.conflicts++; }
                 else env.mergeCounts.unchanged++;
             }
             prevNativePanel = panelId;
         });
-        // Local-only panels of a re-created scene are carried over by their
-        // own exported form, so nothing is lost when the old scene goes.
+        // Carry local-only panels into the re-created scene before the old
+        // one goes.
         if (freshScene && nativeScene) {
             nativeScene.panels.forEach(function (lp) {
                 var le = plan.byId[lp.archiveId];
@@ -458,31 +484,7 @@ function applyPlan(env, plan, res) {
         }
     });
 
-    // Cameras: an updated or taken scene gets the archive's keyframes; the
-    // sboardx-camera baseline is re-stamped for taken and kept conflicts,
-    // so a kept one stops asking.
-    plan.cameras.forEach(function (ce) {
-        var take = ce.kind === "updated" || (ce.kind === "conflict" && takeCam[ce.sceneArchiveId]);
-        if (!take && ce.kind !== "conflict") return;
-        var sceneNow = plan.sceneNative[ce.sceneArchiveId] || ce.native;
-        var stale = take && exp.cameraKfsMatch(env, ce.live, ce.archiveKfs);   // the live camera already is the file's
-        if (take && !stale) {
-            try {
-                if (!ce.archiveKfs.length) env.mm.clearCameraMotion(sceneNow);
-                else if (!imp.applySceneCamera(env, sceneNow, ce.archiveKfs)) env.log.warn("scene '" + ce.sceneName + "': the camera move did not apply");
-                env.mergeCounts.cameras++;
-            } catch (eC) {
-                env.log.warn("scene '" + ce.sceneName + "': camera not applied (" + eC + ")");
-                return;
-            }
-        } else if (!take) {
-            env.mergeCounts.camerasKept++;
-        }
-        if (env.sb.numberOfPanelsInScene(sceneNow) > 0) {
-            common.setPanelMeta(env.sb, String(env.sb.panelInScene(sceneNow, 0)), "sboardx-camera", JSON.stringify(ce.archiveKfs));
-        }
-    });
-    // Audio: whole tracks from the file, only when asked.
+    // Audio: whole tracks, only when asked.
     if (res.takeAudio && env.groups.length) {
         var firstScene = plan.sceneNative[env.groups[0].srcId];
         var firstPanel = firstScene && env.sb.numberOfPanelsInScene(firstScene) > 0 ? String(env.sb.panelInScene(firstScene, 0)) : "";
@@ -494,7 +496,7 @@ function applyPlan(env, plan, res) {
         }
     }
 
-    // Removed panels (with the user's leave), the moved originals, the re-created scenes' originals.
+    // Deletions: removed panels (if asked), then moved originals and old scenes.
     if (res.deleteRemoved) {
         plan.entries.forEach(function (re) {
             if (re.kind !== "removed" || !re.native) return;
@@ -514,9 +516,72 @@ function applyPlan(env, plan, res) {
         env.sb.deleteScene(sid);
         delete map.scenes[sid];
     });
+    // SBP suffixes a scene name that's taken ("20" -> "20_A"), which happens
+    // while originals still exist. Rename now that they're gone.
+    env.groups.forEach(function (group) {
+        var sid = plan.sceneNative[group.srcId];
+        if (!sid || String(env.sb.nameOfScene(sid)) === group.name) return;
+        env.sb.renameScene(sid, group.name);
+        if (String(env.sb.nameOfScene(sid)) !== group.name) {
+            env.log.warn("scene '" + group.name + "' is named '" + env.sb.nameOfScene(sid) + "' (the name is taken in this project)");
+        }
+    });
+
+    // Cameras last: they clamp onto scene frames, final only now.
+    applyCameras(env, plan, takeCam);
 }
 
-// A scene after `prevNativeScene` (before the first scene when none).
+// Cameras and their new baselines (stamped by finishExchange):
+//   updated / conflict taken  -> file's camera; baseline file keys + read-back
+//   unchanged                 -> as is, baseline re-read
+//   conflict kept             -> as is; archive side takes the file's (stops
+//                                asking), local side stays
+//   changed here only         -> as is, baseline as it was
+//   added scene               -> file's camera, full baseline
+// A re-created scene has no camera: it gets the file's, or if changed here
+// its own keys re-applied the importer's way (with a warning).
+function applyCameras(env, plan, takeCam) {
+    var fps = env.xenv.fps;
+    function setCamera(sceneId, ce, kfs) {
+        try {
+            if (!kfs.length) { env.mm.clearCameraMotion(sceneId); return true; }
+            return imp.applySceneCamera(env, sceneId, kfs);
+        } catch (e) {
+            env.log.warn("scene '" + ce.sceneName + "': camera not applied (" + e + ")");
+            return false;
+        }
+    }
+    plan.cameras.forEach(function (ce) {
+        var sceneNow = plan.sceneNative[ce.sceneArchiveId] || ce.native;
+        var fresh = sceneNow !== ce.native;
+        var take = ce.kind === "updated" || (ce.kind === "conflict" && !!takeCam[ce.sceneArchiveId]);
+        if (take || ce.kind === "unchanged") {
+            var applied = false;
+            if (fresh || (take && !common.cameraKfsMatch(ce.live, ce.archiveKfs, fps, common.sceneFrameCount(env.sb, sceneNow)))) {
+                applied = setCamera(sceneNow, ce, ce.archiveKfs) && ce.archiveKfs.length > 0;
+            }
+            if (take) env.mergeCounts.cameras++;
+            env.cameraStamps.push({ sceneId: sceneNow, archive: ce.archiveKfs, local: "live", verify: applied });
+            return;
+        }
+        if (ce.kind === "conflict") env.mergeCounts.camerasKept++;
+        if (fresh && ce.live.length && setCamera(sceneNow, ce, ce.live)) {
+            env.log.warn("scene '" + ce.sceneName + "' was re-created to move it: its camera, changed here, was re-keyed " +
+                         "from its keys (the easing between them is the importer's)");
+        }
+        var local = ce.base ? ce.base.local : null;
+        env.cameraStamps.push({ sceneId: sceneNow, archive: ce.kind === "conflict" || !ce.base ? ce.archiveKfs : ce.base.archive,
+                                local: local });
+    });
+    env.groups.forEach(function (grp) {
+        if (plan.addedScenes.indexOf(grp.srcId) < 0 || !plan.sceneNative[grp.srcId]) return;
+        var sceneId = plan.sceneNative[grp.srcId];
+        var applied = grp.keyframes.length > 0 && setCamera(sceneId, { sceneName: grp.name }, grp.keyframes);
+        env.cameraStamps.push({ sceneId: sceneId, archive: grp.keyframes, local: "live", verify: applied });
+    });
+}
+
+// After prevNativeScene, or first if none.
 function createSceneAt(env, name, prevNativeScene) {
     var id = prevNativeScene ? env.sb.insertScene(true, prevNativeScene, name)
            : env.sb.numberOfScenesInProject() > 0 ? env.sb.insertScene(false, String(env.sb.sceneInProject(0)), name)
@@ -524,29 +589,29 @@ function createSceneAt(env, name, prevNativeScene) {
     return id ? String(id) : "";
 }
 
-// Fills a re-created panel from a panel's own exported form (a staging
-// folder laid out like an archive).
+// own.dir is laid out like an archive, so just point the importer at it.
 function fillFromOwn(env, panelId, own, fallbackMeta) {
     var saved = env.extractDir;
     env.extractDir = own.dir;
+    env.ownFormFill = true;   // shared drawings are already ours (imp.sharedLinkFor)
     new Dir(own.dir + "/_tiles").mkdirs();
     try {
         imp.fillPanelFromArchive(env, panelId, own.outId,
                                  common.readJsonFile(own.dir + "/panels/" + own.outId + "/panel.json") || fallbackMeta, false);
     } finally {
         env.extractDir = saved;
+        env.ownFormFill = false;
     }
 }
 
-// What a re-created panel keeps from its original besides its content: the
-// metadata (the camera baseline of a scene's first panel among it) and the
-// panel colour.
+// Metadata and panel colour. Skips the camera baseline, applyCameras
+// re-stamps it.
 function copyPanelExtras(env, fromId, toId) {
     try {
         var metas = env.sb.getPanelMetadatas(fromId) || [];
         for (var i = 0; i < metas.length; i++) {
             var m = metas[i];
-            if (!m || !m.name || m.name === "sboardx-id") continue;
+            if (!m || !m.name || m.name === "sboardx-camera") continue;
             env.sb.setPanelMetadata(toId, { name: String(m.name), type: String(m.type || "string"),
                                             creator: String(m.creator || "sboardx"), version: String(m.version || "1.0"), value: m.value });
         }
@@ -557,18 +622,20 @@ function copyPanelExtras(env, fromId, toId) {
     }
 }
 
-// A re-created panel takes its original's id-map entry.
 function rekeyPanel(map, oldId, newId) {
     if (!map.panels[oldId]) return;
     map.panels[newId] = map.panels[oldId];
     delete map.panels[oldId];
 }
 
-// A kept panel's baselines: its own form (computed by the plan) and, when
-// it had none, the archive digest.
-function stampLocal(env, panelId, e) {
+// Baseline for a kept panel re-created from its own form. If it was
+// unchanged here, re-stamp its fingerprint at the end. If changed, keep the
+// old fp so it still reads "changed here". No baseline stays none. Fills
+// in a missing digest.
+function recreatedBaseline(env, panelId, e) {
     var entry = env.idMap.panels[panelId];
-    if (e.own) entry.local = e.own.hex;
+    var fp = common.idEntryFingerprint(entry);
+    if (fp && e.fpNow && e.fpNow === fp) env.stampAfter.push(panelId);
     if (!entry.digest) entry.digest = e.archiveDigest;
 }
 

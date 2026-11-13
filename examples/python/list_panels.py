@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Zero Eleven Labs Inc.
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
 """Print every panel of a .sboardx, grouped by scene.
 
-usage: list_panels.py FILE.sboardx
+usage: uv run list_panels.py FILE.sboardx
 """
 import json
 import sys
