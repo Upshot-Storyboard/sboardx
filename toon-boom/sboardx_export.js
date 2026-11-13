@@ -118,8 +118,8 @@ function warnOnce(env, key, text) {
 }
 
 // Art outside the frame is rendered zoomed out, up to this factor. SBP caps
-// renders at 4096 px wide, so past about two frames (at 1080p) textures get
-// a lower density, but they are not cut.
+// renders at 4096 px wide, so past about two frames (at 1080p) textures and
+// bitmap or text layers get a lower density, but they are not cut.
 var MAX_RENDER_SCALE = 4;
 
 // ── Merge baselines (SPEC.md "Merging", sboardx_common.js loadIdMap) ────────
@@ -334,7 +334,8 @@ function fingerprintLayer(fp, li, facts) {
         kind = hashDrawingFingerprint(H, li, xenv.worldPerDrawing, data, brushMarked, ms);
     }
     if (kind === "bitmap" || kind === "text" || kind === "image") {
-        // Same as stageImageLayer, the render is at export resolution.
+        // Stands for the render: its size and placement follow from the
+        // drawing file and the resolution, both hashed.
         entry.image = { file: "images/" + fp.outId + "_" + layerId + ".png", w: xenv.resW, h: xenv.resH,
                         transform: [xenv.frameW / xenv.resW, 0, 0, xenv.frameH / xenv.resH, 0, 0] };
         if (!xenv.hasSession) entry.opacity = 100;   // -batch bakes opacity into the render
@@ -1629,16 +1630,19 @@ function rasterizePanel(env, sceneId, panelId, outId, jobs, camKfs) {
                          "neutralize for the render; its textures may be cut from the wrong place");
             }
             if (!env.hasSession) job.opacityBaked = true;   // can't reset it without undo
-            var k = job.renderK;
+            var k = job.renderK, placed = null;
             var src = renderLayerAlone(env, em, panelId, outId, n, job, keep, k);
             if (src && job.kind === "atlas" && buildAtlas(env, outId, job, src, k) === "retry") {
                 // Zoomed render was off, render the plain frame.
                 k = 1;
                 src = renderLayerAlone(env, em, panelId, outId, n, job, keep, 1);
                 if (src) buildAtlas(env, outId, job, src, 1);
-            } else if (src && job.kind === "image") stageImageLayer(env, outId, job, src);
+            } else if (src && job.kind === "image") {
+                placed = placeImageRender(env, em, panelId, outId, n, job, keep, src);
+                stageImageLayer(env, outId, job, placed);
+            }
             if (src && job.renderKey) {
-                env.renderCache[job.renderKey] = { src: src, k: k, atlas: job.atlas,
+                env.renderCache[job.renderKey] = { src: src, k: k, atlas: job.atlas, placed: placed,
                                                    sig: job.kind === "atlas" ? texturedSignature(job) : "" };
             }
             if (!src) env.log.warn("layer '" + job.layerName + "' (panel " + panelId + ") did not render; " +
@@ -1669,7 +1673,7 @@ function cachedRender(env, outId, job) {
     if (!hit) return false;
     job.opacityBaked = false;   // cached renders always come from a session
     if (job.kind === "image") {
-        stageImageLayer(env, outId, job, hit.src);
+        stageImageLayer(env, outId, job, hit.placed);
         return true;
     }
     if (hit.atlas && hit.sig === texturedSignature(job) && copyCachedAtlas(env, outId, job, hit.atlas)) return true;
@@ -1737,16 +1741,16 @@ function renderScale(env, job) {
     return k > 1.001 ? Math.ceil(k * 100) / 100 : 1;
 }
 
-// Renders only the `keep` layers to a PNG, zoomed out by `k`. Returns the
-// path or null.
-function renderLayerAlone(env, em, panelId, outId, layerCount, job, keep, k) {
-    var dir = env.stagingDir + "/raster/" + outId + "_" + job.li + (k > 1 ? "_x" + k : "");
+// Renders only the `keep` layers to a PNG, zoomed out by `k`, at the export
+// resolution times k, or at `probe` {w, h} pixels. Returns the path or null.
+function renderLayerAlone(env, em, panelId, outId, layerCount, job, keep, k, probe) {
+    var dir = env.stagingDir + "/raster/" + outId + "_" + job.li + (probe ? "_probe" : k > 1 ? "_x" + k : "");
     new Dir(dir).mkdirs();
     var ok = false;
     try {
         for (var j = 0; j < layerCount; j++) env.lm.setLayerVisible(panelId, j, keep.indexOf(j) >= 0);
         em.setZoomFactor(1 / k);
-        em.setExportResolution(Math.round(env.resW * k), Math.round(env.resH * k));
+        em.setExportResolution(probe ? probe.w : Math.round(env.resW * k), probe ? probe.h : Math.round(env.resH * k));
         ok = em.exportToBitmap(dir, "layer", "png");
     } catch (e) {
         env.log.warn("render of layer '" + job.layerName + "' failed: " + e);
@@ -1755,18 +1759,172 @@ function renderLayerAlone(env, em, panelId, outId, layerCount, job, keep, k) {
     return ok && files && files.length ? dir + "/" + files[0] : null;
 }
 
-function stageImageLayer(env, outId, job, src) {
+// `placed` is {file, w, h, transform} (placeImageRender).
+function stageImageLayer(env, outId, job, placed) {
     var fileName = outId + "_" + job.layerId + ".png";
-    if (!common.copyFile(src, env.stagingDir + "/images/" + fileName)) {
+    if (!placed || !common.copyFile(placed.file, env.stagingDir + "/images/" + fileName)) {
         env.log.warn("could not stage the render of layer '" + job.layerName + "'");
         return;
     }
-    var size = common.imageSize(src) || { w: env.resW, h: env.resH };
-    job.entry.image = { file: "images/" + fileName, w: size.w, h: size.h,
-                        transform: [env.frameW / size.w, 0, 0, env.frameH / size.h, 0, 0] };
+    job.entry.image = { file: "images/" + fileName, w: placed.w, h: placed.h, transform: placed.transform };
     // Opacity already in the pixels (-batch).
     if (job.opacityBaked) job.entry.opacity = 100;
     env.counts.rasterLayers++;
+}
+
+// ── Bitmap and text layers past the frame ───────────────────────────────────
+
+// An image job's frame render `src`, cut to where it has pixels and placed
+// in world units: {file, w, h, transform}. Pixels on the render's edge may
+// go on past the frame: a probe render MAX_RENDER_SCALE frames wide finds
+// how far, and the layer is rendered again zoomed out to cover them. An
+// empty render stays whole.
+function placeImageRender(env, em, panelId, outId, n, job, keep, src) {
+    var render = new QImage(src);
+    var box = render.isNull() ? null : alphaBox(render);
+    if (!box) return framePlacement(env, src);
+    var k = 1;
+    if (touchesEdge(box, render)) {
+        var zoomed = zoomedImageRender(env, em, panelId, outId, n, job, keep);
+        if (zoomed) { src = zoomed.src; render = zoomed.render; box = zoomed.box; k = zoomed.k; }
+    }
+    return trimmedPlacement(env, outId, job, src, render, box, k);
+}
+
+// The whole render over the frame (k = 1).
+function framePlacement(env, src) {
+    var size = common.imageSize(src) || { w: env.resW, h: env.resH };
+    return { file: src, w: size.w, h: size.h, transform: [env.frameW / size.w, 0, 0, env.frameH / size.h, 0, 0] };
+}
+
+// The layer rendered zoomed out to hold all its pixels, or null to keep the
+// frame render: {src, render, box, k}.
+function zoomedImageRender(env, em, panelId, outId, n, job, keep) {
+    // The probe has the frame's pixel count, so it costs what a frame render costs.
+    var M = MAX_RENDER_SCALE;
+    var probeSrc = renderLayerAlone(env, em, panelId, outId, n, job, keep, M, { w: env.resW, h: env.resH });
+    var probe = probeSrc ? new QImage(probeSrc) : null;
+    var pbox = probe && !probe.isNull() && renderAspectOk(env, probe) ? alphaBox(probe) : null;
+    if (!pbox) {
+        warnOnce(env, "zoom-image", "zoomed-out renders fail in this Storyboard Pro; bitmap and text layers are cut at the frame");
+        return null;
+    }
+    if (touchesEdge(pbox, probe)) {
+        warnOnce(env, "image-past-max:" + job.layerName, "layer '" + job.layerName + "' reaches more than " + M +
+                 " frames out of the frame; it is cut there");
+    }
+    // Zoom-out reaching the probe's pixels plus m probe pixels (hw, hh: half
+    // the frame in probe pixels).
+    var Wp = probe.width(), Hp = probe.height(), hw = Wp / (2 * M), hh = Hp / (2 * M);
+    function need(m) {
+        return Math.max((Wp / 2 - pbox.x + m) / hw, (pbox.x + pbox.w - Wp / 2 + m) / hw,
+                        (Hp / 2 - pbox.y + m) / hh, (pbox.y + pbox.h - Hp / 2 + m) / hh);
+    }
+    if (need(0) <= 1) return null;   // the pixels end at the frame
+    // 2 px of margin for the probe's coarser pixels.
+    var k = imageRenderScale(env, need(2));
+    if (k <= 1) return null;
+    var src = renderLayerAlone(env, em, panelId, outId, n, job, keep, k);
+    var render = src ? new QImage(src) : null;
+    if (!render || render.isNull()) return null;
+    if (!renderAspectOk(env, render)) {
+        warnOnce(env, "zoom-size-image", "Storyboard Pro rendered " + render.width() + "x" + render.height() + " instead of " +
+                 Math.round(env.resW * k) + "x" + Math.round(env.resH * k) + " for a zoomed-out render; bitmap and text " +
+                 "layers are cut at the frame");
+        return null;
+    }
+    var box = alphaBox(render);
+    if (!box) {
+        warnOnce(env, "zoom-image", "zoomed-out renders fail in this Storyboard Pro; bitmap and text layers are cut at the frame");
+        return null;
+    }
+    if (render.width() < env.resW * k - 2) {
+        warnOnce(env, "zoom-clamp-image", "Storyboard Pro renders at most " + render.width() + " px wide: bitmap and text layers " +
+                 "reaching more than " + (render.width() / env.resW).toFixed(1) + " frames out get a lower pixel density " +
+                 "(first: '" + job.layerName + "')");
+    }
+    return { src: src, render: render, box: box, k: k };
+}
+
+// Smallest zoom-out >= need, up to MAX_RENDER_SCALE. Where the resolution
+// allows it, both render sides grow by an even number of pixels in the
+// frame's proportions: the render's pixel grid then lies on the frame
+// render's, and the pixels inside the frame come out the same as at k = 1.
+function imageRenderScale(env, need) {
+    if (!(need > 1.001)) return 1;
+    var g = gcd(env.resW, env.resH), step = 2 / g;
+    if (step > 0.05) return Math.min(Math.ceil(need * 100) / 100, MAX_RENDER_SCALE);
+    var j = Math.ceil((need - 1) / step - 1e-9);
+    return Math.min((env.resW + j * 2 * (env.resW / g)) / env.resW, MAX_RENDER_SCALE);
+}
+
+function gcd(a, b) {
+    a = Math.abs(Math.round(a)); b = Math.abs(Math.round(b));
+    while (b) { var t = a % b; a = b; b = t; }
+    return a || 1;
+}
+
+// SBP caps the width at 4096 px but keeps the aspect. A different aspect
+// means the zoom misbehaved.
+function renderAspectOk(env, img) {
+    var want = env.resW / env.resH;
+    return Math.abs(img.width() / img.height() - want) <= 0.02 * want;
+}
+
+function touchesEdge(box, img) {
+    return box.x === 0 || box.y === 0 || box.x + box.w >= img.width() || box.y + box.h >= img.height();
+}
+
+// The render cut to its pixels plus a 1 px margin, placed in world units
+// (SPEC.md "layers.json" `image.transform`: the pixel rect centred on its
+// origin). The render spans the frame times its zoom, centred on the origin.
+function trimmedPlacement(env, outId, job, src, render, box, k) {
+    var W = render.width(), H = render.height();
+    var x0 = Math.max(0, box.x - 1), y0 = Math.max(0, box.y - 1);
+    var w = Math.min(W, box.x + box.w + 1) - x0, h = Math.min(H, box.y + box.h + 1) - y0;
+    var file = src;
+    if (w !== W || h !== H) {
+        // A fresh image, not render.copy(): see buildAtlas.
+        var img = new QImage(w, h, QImage.Format_ARGB32);
+        img.fill(0);
+        var p = new QPainter();
+        p.begin(img);
+        p.setCompositionMode(QPainter.CompositionMode_Source);
+        p.drawImage(-x0, -y0, render);
+        p.end();
+        file = env.stagingDir + "/raster/" + outId + "_" + job.li + "_trim.png";
+        if (!img.save(file, "PNG")) { file = src; x0 = 0; y0 = 0; w = W; h = H; }
+    }
+    // World units per render pixel, from the pixel counts asked for.
+    var sx = env.frameW * Math.round(env.resW * k) / env.resW / W;
+    var sy = env.frameH * Math.round(env.resH * k) / env.resH / H;
+    return { file: file, w: w, h: h, transform: [sx, 0, 0, sy, (x0 + w / 2 - W / 2) * sx, (y0 + h / 2 - H / 2) * sy] };
+}
+
+// The alpha bounding box {x, y, w, h} in pixels, null if all transparent.
+// Plus-compositing the image onto itself at doubling offsets folds every
+// row into column 0 and every column into row 0; Plus saturates, so a
+// pixel with any alpha keeps its fold non-zero.
+function alphaBox(img) {
+    var W = img.width(), H = img.height();
+    var a = img.convertToFormat(QImage.Format_ARGB32_Premultiplied);
+    function fold(horizontal) {
+        var acc = a.copy(0, 0, W, H), n = horizontal ? W : H;
+        for (var s = 1; s < n; s *= 2) {
+            var shifted = acc.copy(0, 0, W, H);
+            var p = new QPainter();
+            p.begin(acc);
+            p.setCompositionMode(QPainter.CompositionMode_Plus);
+            if (horizontal) p.drawImage(-s, 0, shifted); else p.drawImage(0, -s, shifted);
+            p.end();
+        }
+        return acc;
+    }
+    var rows = fold(true), cols = fold(false);
+    var x0 = -1, x1 = -1, y0 = -1, y1 = -1, i;
+    for (i = 0; i < H; i++) if ((rows.pixel(0, i) >>> 24) !== 0) { if (y0 < 0) y0 = i; y1 = i; }
+    for (i = 0; i < W; i++) if ((cols.pixel(i, 0) >>> 24) !== 0) { if (x0 < 0) x0 = i; x1 = i; }
+    return y0 < 0 || x0 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
 }
 
 // The layer's render cropped to its textured contours is the atlas, one

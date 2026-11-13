@@ -185,8 +185,10 @@ saved files, so anything since the last save would come out empty or
 stale. The project is saved again after the archive is written, to keep
 the merge bookkeeping with it.
 
-**Layers** are read back as vectors. Bitmap layers are rendered at the
-project resolution and cropped to the frame. Panel notes and dialogue,
+**Layers** are read back as vectors. Bitmap layers are rendered alone at
+the project resolution's pixel density (zoomed out up to four frames when
+they reach past the frame, their own and their groups' motion set aside)
+and cut to where they have pixels. Panel notes and dialogue,
 audio tracks, camera moves and sequences come along. A panel's display
 code is `<scene>-<panel>`.
 
@@ -439,8 +441,9 @@ Storyboard Pro. A run that finds nothing to update is fine either way.
   so a fade on a layer whose own opacity is below 100 % comes back as a
   100 % layer whose track carries the product. A group's fade imports as
   its highest opacity, constant over the panel.
-- Image layers are rendered at the project resolution and cropped to the
-  frame. In batch, image layers in a scene with a camera move are skipped,
+- Bitmap and text layers are cut more than four frames out of the frame,
+  and past about two frames (at 1080p) they get a lower pixel density.
+  In batch, image layers in a scene with a camera move are skipped,
   layer motion can't be set aside for a textured layer's render (its tiles
   may miss), and renders keep the layer's opacity in their pixels (the
   image layer is then written at 100 %).
