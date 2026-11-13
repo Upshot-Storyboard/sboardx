@@ -5,6 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 examples/python/validate.py samples/*.sboardx
-      - run: python3 examples/python/list_panels.py samples/Demo.sboardx
-      - run: python3 examples/python/extract_art.py samples/Demo.sboardx /tmp/art && ls -R /tmp/art
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run examples/python/validate.py samples/*.sboardx
+      - run: uv run examples/python/list_panels.py samples/Demo.sboardx
+      - run: uv run examples/python/extract_art.py samples/Demo.sboardx /tmp/art && ls -R /tmp/art
